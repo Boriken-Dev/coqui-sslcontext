@@ -19,6 +19,7 @@ pub mod keystore;
 mod load;
 mod password;
 mod pin;
+mod pins;
 pub mod policy;
 mod secret;
 mod select;
@@ -36,6 +37,7 @@ pub use keystore::KeychainSource;
 pub use keystore::{Pkcs11Source, Pkcs11SourceBuilder};
 pub use password::KeyPassword;
 pub use pin::{KeystoreKind, Pin, PinAnswer, PinCallback, PinPurpose, PinRequest};
+pub use pins::Pins;
 pub use policy::{
     AutoSelectRule, AutoSelectRuleBuilder, NameFilter, browser_policies, rules_from_policy,
 };

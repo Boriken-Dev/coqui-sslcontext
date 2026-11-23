@@ -21,6 +21,7 @@ use crate::error::{Error, Reason};
 use crate::identity::Identity;
 use crate::keylog::key_log;
 use crate::pin::Pin;
+use crate::pins::{PinnedLeafVerifier, PinningVerifier, Pins};
 use crate::select::{IdentityQuery, Selector};
 use crate::settings::{KeyLogging, TlsSettings, TlsVersion};
 
@@ -39,6 +40,9 @@ pub enum Trust {
     Bundle(PathBuf),
     /// Nobody: no server is verified. Reported by [`Tls::non_defaults`].
     Disabled,
+    /// Only a server whose certificate carries one of these public keys, with no chain to a root:
+    /// for a self-signed peer. The name and the validity period are still checked.
+    Pinned(Pins),
 }
 
 impl Trust {
@@ -122,6 +126,7 @@ pub struct TlsBuilder {
     alpn: Vec<Vec<u8>>,
     pin: Pin,
     fallback: Option<Identity>,
+    pins: Option<Pins>,
     settings: TlsSettings,
 }
 
@@ -133,6 +138,7 @@ impl Default for TlsBuilder {
             alpn: Vec::new(),
             pin: Pin::Keystore,
             fallback: None,
+            pins: None,
             settings: TlsSettings::default(),
         }
     }
@@ -171,6 +177,13 @@ impl TlsBuilder {
     /// An identity sent when the keystores offer none that fits (default: none).
     pub fn fallback_identity(mut self, identity: Identity) -> Self {
         self.fallback = Some(identity);
+        self
+    }
+
+    /// Public key pins, checked in addition to the trust: a server is accepted only if the trust
+    /// vouches for it and one of the certificates it sends carries a pinned key (default: none).
+    pub fn pins(mut self, pins: Pins) -> Self {
+        self.pins = Some(pins);
         self
     }
 
@@ -218,6 +231,25 @@ impl TlsBuilder {
             Trust::Disabled => {
                 Arc::new(DisabledVerifier(provider.signature_verification_algorithms))
             }
+            Trust::Pinned(pins) => {
+                if pins.is_empty() {
+                    return Err(Error::Tls(Reason::new("no pin was given")));
+                }
+                Arc::new(PinnedLeafVerifier {
+                    pins: pins.clone(),
+                    algorithms: provider.signature_verification_algorithms,
+                })
+            }
+        };
+        let verifier: Arc<dyn ServerCertVerifier> = match self.pins.clone() {
+            Some(pins) if pins.is_empty() => {
+                return Err(Error::Tls(Reason::new("no pin was given")));
+            }
+            Some(pins) => Arc::new(PinningVerifier {
+                inner: verifier,
+                pins,
+            }),
+            _ => verifier,
         };
         let selector = match &self.client_certificates {
             ClientCertificates::System | ClientCertificates::Query(_) => {
@@ -251,7 +283,7 @@ pub(crate) fn trust_roots(trust: &Trust) -> Result<RootCertStore, Error> {
         Trust::Roots(roots) => roots.clone(),
         Trust::Bundle(path) => bundle_roots(path)?,
         Trust::System => rustls_native_certs::load_native_certs().certs,
-        Trust::Disabled => Vec::new(),
+        Trust::Disabled | Trust::Pinned(_) => Vec::new(),
     };
     let mut store = RootCertStore::empty();
     let (added, _ignored) = store.add_parsable_certificates(roots);
