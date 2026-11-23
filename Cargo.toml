@@ -1,0 +1,25 @@
+[package]
+name = "coqui-sslcontext"
+version = "0.0.0-alpha.0"
+description = "rustls configurations that follow the system: the OS trust store, client certificates held in OS keystores, server configurations, pins and a test CA"
+readme = "README.md"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Boriken-Dev/coqui-sslcontext"
+keywords = ["tls", "rustls", "client-certificate", "pkcs11", "system"]
+categories = ["network-programming", "cryptography"]
+# Git dependencies cannot be published to crates.io.
+publish = false
+exclude = [".*", "*.local.*", "/tools/"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = []
+
+[dependencies]
+
+[dev-dependencies]

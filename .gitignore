@@ -1,0 +1,23 @@
+# Category rule: nothing dot-prefixed at the repo root is tracked except the git
+# config files re-included below and the CI workflows.
+/.*
+!/.gitignore
+!/.gitattributes
+!/.github/
+
+# Private agent config and personal overrides, at any depth. No trailing slash:
+# `.agents` can be a symlink, which git treats as a file.
+.agents
+*.local.*
+CLAUDE*
+.claude
+
+# Rust
+/target/
+# Cargo.lock is committed: the deps branch is kept equal to it.
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
