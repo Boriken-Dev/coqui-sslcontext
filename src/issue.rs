@@ -284,7 +284,10 @@ impl CertificateAuthority {
     pub fn private_key_pem(&self, password: &KeyPassword) -> Result<Zeroizing<String>, Error> {
         match password.resolve()? {
             None => Ok(Zeroizing::new(self.issuer.key().serialize_pem())),
-            Some(password) => encrypt_pem(&self.issuer.key().serialize_der(), password.expose()),
+            Some(password) => encrypt_pem(
+                &Zeroizing::new(self.issuer.key().serialize_der()),
+                password.expose(),
+            ),
         }
     }
 

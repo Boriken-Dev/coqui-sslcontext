@@ -127,8 +127,9 @@ and `Display` and is wiped on drop.
 certificate() -> Option<&CertificateInfo>, purpose() -> PinPurpose, keystore_prompt() -> bool}`; it never
 holds a PIN. `PinPurpose::{List (declining hides the keys), Sign (declining fails the signature),
 PerSignature (the key demands the PIN every time)}`. `KeystoreKind::{Cng, Pkcs11, Keychain}`.
-Nothing waits on a person unless the PIN is `Pin::Keystore` or a callback answers `Keystore` (and
-the token has a PIN pad); with no PIN a listing shows only what is visible and a signature fails
+`Pin::None` never waits on a person. `Pin::Keystore` or a callback answering `Keystore` lets the
+keystore ask (PKCS#11 needs a PIN pad); `CngSource`, `TlsBuilder` and `Selector::system()` default
+to `Pin::Keystore`, `Pkcs11Source` and `KeychainSource` to `Pin::None`; with no PIN a listing shows only what is visible and a signature fails
 at once. **A PIN the keystore rejects is `Error::WrongPin` and is never sent again by that source**,
 so a retry cannot lock a card; make a new source to try another PIN.
 
@@ -176,7 +177,9 @@ info(), private_key_pem(&KeyPassword) (encrypted with `encrypted-keys`), issue(n
 server_tls(names) -> Result<ServerTlsBuilder, Error>, with_settings(IssueSettings)}`.
 `CertificateAuthorityBuilder::{permitted(names), settings, create()}`: permitted names become critical name
 constraints (`corp.example`, `.corp.example`, `*.corp.example` cover the name and its subdomains;
-`10.0.0.0/8` an IP network); an unrepresentable name is `Error::Credential`.
+`10.0.0.0/8` an IP network); a kind of name with no permitted entry is excluded whole (a DNS-only
+CA cannot vouch for an IP address, nor an IP-only CA for a DNS name); an unrepresentable name is
+`Error::Credential`.
 `LeafBuilder::{common_name, validity, key_type, issue()}`; the leaf has the names as SANs, server and
 client EKU, SKI and AKI. `IssuedCertificate::{certificate_pem, key_pem, chain_pem, certificate_der, private_key,
 info, identity, server_config(ClientAuth)}`. Key types: EC P-256 and P-384, Ed25519 and RSA (made by the
@@ -202,7 +205,12 @@ Tests read `COQUI_SSLCONTEXT_TEST_PKCS11`, `COQUI_SSLCONTEXT_TEST_CNG` and
 
 ## Gotchas
 
-- Sources hold no key material: signing goes to the keystore each time. A wrong PIN is not retried.
+- Sources hold no key material: signing goes to the keystore each time. A wrong PIN is not retried:
+  it is recorded per token (PKCS#11), per key (CNG) or per keychain file, under one lock held from the
+  check to the login, and before the PIN callback is asked again. CNG cannot tell a wrong PIN from
+  another signing failure, so any failure after a PIN was sent counts as a rejection for that key.
+- `Trust::Disabled` with `pins(..)` is refused at `build()`: nothing would check the handshake. A pin
+  counts only a certificate the leaf chains to (the leaf itself, or an issuer the server sent).
 - `Selector::system()` and the default `TlsBuilder` use `Pin::Keystore`, which may show a dialog; pass
   `Pin::None` for a client that must never wait.
 - Strict X.509 verification is always on; a lax verifier and TLS 1.3 post-handshake client

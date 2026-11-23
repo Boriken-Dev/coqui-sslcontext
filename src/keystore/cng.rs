@@ -88,7 +88,8 @@ impl IdentitySource for CngSource {
             .map_err(|error| Error::Tls(Reason::new(error.to_string())))?;
         let mut found = Vec::new();
         for context in contexts {
-            // A certificate with no key, or whose key needs the user to open, is not an identity.
+            // Listing opens each key silently: a certificate with no key, or whose key needs the
+            // user to open it, is not listed. A key is opened again, silent first, to sign.
             if context.acquire_key(true).is_err() {
                 continue;
             }

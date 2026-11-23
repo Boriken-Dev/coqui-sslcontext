@@ -1,9 +1,11 @@
 //! How a PIN reaches a keystore: a value, a callback, the keystore's own prompt, or nothing.
 //!
-//! Nothing waits on a person unless the caller asked for it. With no PIN an operation that needs
-//! one fails at once; a keystore's own prompt (a Windows dialog, a PIN pad) is used only for
-//! [`Pin::Keystore`] or a callback answering [`PinAnswer::Keystore`]. A PIN the keystore rejected
-//! is not sent again.
+//! With [`Pin::None`], an operation that needs a PIN fails at once and nothing waits on a person.
+//! A keystore's own prompt (a Windows dialog, a PIN pad) is used for [`Pin::Keystore`] or a callback
+//! answering [`PinAnswer::Keystore`]; [`CngSource`](crate::keystore) and
+//! [`TlsBuilder`](crate::TlsBuilder) default to `Pin::Keystore`, as a browser does, while
+//! [`Pkcs11Source`](crate::keystore) and the keychain default to `Pin::None`. A PIN the keystore
+//! rejected is not sent again.
 
 use alloc::string::String;
 use alloc::sync::Arc;

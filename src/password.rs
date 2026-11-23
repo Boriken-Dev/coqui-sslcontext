@@ -6,7 +6,6 @@ use alloc::vec::Vec;
 use core::fmt;
 use std::path::PathBuf;
 
-#[cfg(feature = "encrypted-keys")]
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Reason};
@@ -45,7 +44,7 @@ impl KeyPassword {
             Self::None => Ok(None),
             Self::Secret(secret) => Ok(Some(secret.clone())),
             Self::File(path) => {
-                let bytes = std::fs::read(path)?;
+                let bytes = Zeroizing::new(std::fs::read(path)?);
                 let line = bytes.split(|byte| *byte == b'\n').next().unwrap_or(&[]);
                 let line = line.strip_suffix(b"\r").unwrap_or(line);
                 let text = core::str::from_utf8(line)

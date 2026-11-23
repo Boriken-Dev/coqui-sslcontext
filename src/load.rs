@@ -5,6 +5,7 @@ use std::path::Path;
 
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use zeroize::Zeroizing;
 
 use crate::error::{Error, Reason};
 use crate::identity::Identity;
@@ -124,7 +125,7 @@ impl Identity {
         password: KeyPassword,
     ) -> Result<Self, Error> {
         let certificates = std::fs::read(certificate)?;
-        let key = std::fs::read(key)?;
+        let key = Zeroizing::new(std::fs::read(key)?);
         match (is_pem(&certificates), is_pem(&key)) {
             (true, true) => Self::from_pem_with(&certificates, &key, &password),
             (true, false) => {
@@ -148,7 +149,7 @@ impl Identity {
     ///
     /// [`Error::Io`] when the file cannot be read, otherwise as [`load`](Self::load).
     pub fn load_combined(path: impl AsRef<Path>, password: KeyPassword) -> Result<Self, Error> {
-        let bytes = std::fs::read(path)?;
+        let bytes = Zeroizing::new(std::fs::read(path)?);
         if is_pem(&bytes) {
             return Self::from_pem_with(&bytes, &bytes, &password);
         }

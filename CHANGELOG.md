@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A pin counts only a certificate the leaf chains to; pins with `Trust::Disabled` are refused.
+- A rejected PIN is recorded atomically, before the PIN callback is asked again; a failed
+  signature drops its PKCS#11 session; PINs and key files are wiped from memory.
+- A CA limited to DNS names or to IP networks excludes the other kind of name.
+
 ### Added
 
 - Client configurations that follow the system (`Tls`, `TlsBuilder`, `client_config`): OS trust,
