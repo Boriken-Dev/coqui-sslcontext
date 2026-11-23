@@ -4,5 +4,6 @@
 
 #[cfg(windows)]
 pub mod cng_store;
+pub mod pem;
 pub mod pki;
 pub mod tls_server;

@@ -245,6 +245,22 @@ impl TlsBuilder {
     }
 }
 
+/// The root certificates a trust names, for verifying the other side's certificate.
+pub(crate) fn trust_roots(trust: &Trust) -> Result<RootCertStore, Error> {
+    let roots: Vec<CertificateDer<'static>> = match trust {
+        Trust::Roots(roots) => roots.clone(),
+        Trust::Bundle(path) => bundle_roots(path)?,
+        Trust::System => rustls_native_certs::load_native_certs().certs,
+        Trust::Disabled => Vec::new(),
+    };
+    let mut store = RootCertStore::empty();
+    let (added, _ignored) = store.add_parsable_certificates(roots);
+    if added == 0 {
+        return Err(Error::Tls(Reason::new("no root certificate could be read")));
+    }
+    Ok(store)
+}
+
 fn roots_verifier(
     roots: &[CertificateDer<'static>],
     provider: &Arc<CryptoProvider>,
@@ -262,7 +278,7 @@ fn roots_verifier(
     .map_err(|error| Error::Tls(Reason::new(error.to_string())))?)
 }
 
-fn protocol_versions(
+pub(crate) fn protocol_versions(
     settings: &TlsSettings,
 ) -> Result<Vec<&'static rustls::SupportedProtocolVersion>, Error> {
     let mut versions = Vec::new();

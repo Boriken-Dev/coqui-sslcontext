@@ -233,6 +233,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-cng",
+ "rustls-native-certs",
  "rustls-platform-verifier",
  "security-framework",
  "serde_json",

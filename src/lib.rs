@@ -22,6 +22,7 @@ mod pin;
 pub mod policy;
 mod secret;
 mod select;
+mod server;
 mod settings;
 
 pub use client::{ClientCertificates, NonDefault, Tls, TlsBuilder, Trust, client_config};
@@ -43,4 +44,5 @@ pub use select::{
     CertificateRequest, Chooser, IdentityQuery, IdentityQueryBuilder, IdentitySource, Selector,
     SelectorBuilder,
 };
+pub use server::{ClientAuth, ServerTls, ServerTlsBuilder};
 pub use settings::{KeyLogging, Pkcs11Settings, SelectorSettings, TlsSettings, TlsVersion};

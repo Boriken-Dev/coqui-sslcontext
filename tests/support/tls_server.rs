@@ -78,6 +78,11 @@ impl TlsServer {
                 .with_single_cert(server.chain.clone(), server.key())
                 .unwrap(),
         );
+        Self::start_config(config)
+    }
+
+    /// A server using a configuration made elsewhere.
+    pub fn start_config(config: Arc<ServerConfig>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let presented = Arc::new(Mutex::new(Vec::new()));
@@ -162,12 +167,28 @@ fn serve(
     let _ = tls.flush();
 }
 
+/// What a client learned of a finished connection.
+pub struct Exchange {
+    pub reply: String,
+    pub alpn: Option<Vec<u8>>,
+    pub version: Option<rustls::ProtocolVersion>,
+}
+
 /// A `GET /` over TLS to `addr` for `host`, using `config`; the reply text, or the failure.
 pub fn https_get(
     config: Arc<ClientConfig>,
     addr: SocketAddr,
     host: &str,
 ) -> Result<String, String> {
+    https_exchange(config, addr, host).map(|exchange| exchange.reply)
+}
+
+/// Like [`https_get`], also reporting the negotiated protocol and ALPN choice.
+pub fn https_exchange(
+    config: Arc<ClientConfig>,
+    addr: SocketAddr,
+    host: &str,
+) -> Result<Exchange, String> {
     let name = ServerName::try_from(host.to_string()).unwrap();
     let connection = ClientConnection::new(config, name).map_err(|error| error.to_string())?;
     let tcp = TcpStream::connect(addr).map_err(|error| error.to_string())?;
@@ -179,10 +200,13 @@ pub fn https_get(
     .map_err(|error| error.to_string())?;
     let mut reply = String::new();
     match tls.read_to_string(&mut reply) {
-        Ok(_) => Ok(reply),
-        Err(error) if !reply.is_empty() && error.kind() == std::io::ErrorKind::UnexpectedEof => {
-            Ok(reply)
-        }
-        Err(error) => Err(error.to_string()),
+        Ok(_) => {}
+        Err(error) if !reply.is_empty() && error.kind() == std::io::ErrorKind::UnexpectedEof => {}
+        Err(error) => return Err(error.to_string()),
     }
+    Ok(Exchange {
+        reply,
+        alpn: tls.conn.alpn_protocol().map(<[u8]>::to_vec),
+        version: tls.conn.protocol_version(),
+    })
 }
