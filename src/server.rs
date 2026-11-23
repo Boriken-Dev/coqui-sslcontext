@@ -80,6 +80,11 @@ impl ServerTlsBuilder {
         self
     }
 
+    /// The settings that are not the default, as data: logging session secrets.
+    pub fn non_defaults(&self) -> Vec<NonDefault> {
+        non_defaults(&self.settings)
+    }
+
     /// The server configuration source.
     ///
     /// # Errors
@@ -199,14 +204,18 @@ impl ServerTls {
 
     /// The settings that are not the default, as data: logging session secrets.
     pub fn non_defaults(&self) -> Vec<NonDefault> {
-        let mut found = Vec::new();
-        if self.settings.key_log != KeyLogging::Off {
-            found.push(NonDefault {
-                setting: "key_log",
-                value: "on".into(),
-                default: "off",
-            });
-        }
-        found
+        non_defaults(&self.settings)
     }
+}
+
+fn non_defaults(settings: &TlsSettings) -> Vec<NonDefault> {
+    let mut found = Vec::new();
+    if settings.key_log != KeyLogging::Off {
+        found.push(NonDefault {
+            setting: "key_log",
+            value: "on".into(),
+            default: "off",
+        });
+    }
+    found
 }

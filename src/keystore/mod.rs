@@ -29,7 +29,7 @@ pub use pkcs11::{Pkcs11Source, Pkcs11SourceBuilder};
 /// The operating system's keystores, as sources for [`Selector::system`](crate::Selector::system):
 /// Windows CNG's `MY` store of the current user, the macOS Keychain, and, with the `pkcs11`
 /// feature, PKCS#11's default module where there is one. Each asks `pin` for a smart card's PIN.
-pub fn system_sources(pin: &Pin) -> Vec<Box<dyn IdentitySource>> {
+pub fn system_sources(pin: Pin) -> Vec<Box<dyn IdentitySource>> {
     let _ = pin;
     #[cfg_attr(
         not(any(

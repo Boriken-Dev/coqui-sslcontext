@@ -422,12 +422,12 @@ impl Selector {
     /// A smart card's PIN is asked of the keystore itself, as a browser does
     /// ([`Pin::Keystore`]); [`system_builder`](Self::system_builder) takes another source.
     pub fn system() -> Self {
-        Self::system_builder(&Pin::Keystore).build()
+        Self::system_builder(Pin::Keystore).build()
     }
 
     /// The builder of [`system`](Self::system), with `pin` giving smart card PINs: [`Pin::None`]
     /// never waits on a person, and keys that need a PIN fail instead.
-    pub fn system_builder(pin: &Pin) -> SelectorBuilder {
+    pub fn system_builder(pin: Pin) -> SelectorBuilder {
         let mut builder = Self::builder().browser_policy(true);
         for source in crate::keystore::system_sources(pin) {
             builder.selector.sources.push(source);

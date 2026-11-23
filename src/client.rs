@@ -211,6 +211,11 @@ impl TlsBuilder {
         self
     }
 
+    /// The settings that are not the default, as data (see [`Tls::non_defaults`]).
+    pub fn non_defaults(&self) -> Vec<NonDefault> {
+        non_defaults(&self.trust, &self.settings)
+    }
+
     /// The TLS configuration source.
     ///
     /// # Errors
@@ -253,7 +258,7 @@ impl TlsBuilder {
         };
         let selector = match &self.client_certificates {
             ClientCertificates::System | ClientCertificates::Query(_) => {
-                Some(Arc::new(Selector::system_builder(&self.pin).build()))
+                Some(Arc::new(Selector::system_builder(self.pin.clone()).build()))
             }
             ClientCertificates::Selector(selector) => Some(Arc::clone(selector)),
             ClientCertificates::None
@@ -332,6 +337,25 @@ pub(crate) fn protocol_versions(
     Ok(versions)
 }
 
+fn non_defaults(trust: &Trust, settings: &TlsSettings) -> Vec<NonDefault> {
+    let mut found = Vec::new();
+    if matches!(trust, Trust::Disabled) {
+        found.push(NonDefault {
+            setting: "trust",
+            value: "disabled".into(),
+            default: "system",
+        });
+    }
+    if settings.key_log != KeyLogging::Off {
+        found.push(NonDefault {
+            setting: "key_log",
+            value: "on".into(),
+            default: "off",
+        });
+    }
+    found
+}
+
 /// Makes TLS client configurations that verify servers as the system does and answer certificate
 /// requests from a keystore.
 ///
@@ -370,22 +394,7 @@ impl Tls {
 
     /// The settings that are not the default, as data.
     pub fn non_defaults(&self) -> Vec<NonDefault> {
-        let mut found = Vec::new();
-        if matches!(self.trust, Trust::Disabled) {
-            found.push(NonDefault {
-                setting: "trust",
-                value: "disabled".into(),
-                default: "system",
-            });
-        }
-        if self.settings.key_log != KeyLogging::Off {
-            found.push(NonDefault {
-                setting: "key_log",
-                value: "on".into(),
-                default: "off",
-            });
-        }
-        found
+        non_defaults(&self.trust, &self.settings)
     }
 
     /// The plain settings this source was built with.

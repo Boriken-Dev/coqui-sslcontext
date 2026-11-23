@@ -27,6 +27,12 @@ mod secret;
 mod select;
 mod server;
 mod settings;
+#[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
+pub mod testing;
+
+/// This crate's version.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use client::{ClientCertificates, NonDefault, Tls, TlsBuilder, Trust, client_config};
 pub use error::{Error, Reason};

@@ -114,6 +114,21 @@ impl AutoSelectRule {
         }
     }
 
+    /// The host pattern as given.
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    /// What the certificate's issuer must look like.
+    pub fn issuer(&self) -> &NameFilter {
+        &self.issuer
+    }
+
+    /// What the certificate's subject must look like.
+    pub fn subject(&self) -> &NameFilter {
+        &self.subject
+    }
+
     /// Whether the rule covers `host`; with no host only `*` does.
     pub fn matches_host(&self, host: Option<&str>) -> bool {
         let mut pattern = self.pattern.trim();

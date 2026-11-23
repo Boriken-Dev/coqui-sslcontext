@@ -30,6 +30,8 @@ pkcs12 = ["dep:p12-keystore"]
 # Encrypted PKCS#8 private keys (`KeyPassword`).
 encrypted-keys = ["dep:pkcs8"]
 # A certificate authority and the leaf certificates it issues (`CertificateAuthority`).
+# Software keys that count their signatures (`testing::SoftwareSigningKey`).
+testing = []
 issue = ["dep:rcgen", "dep:time", "dep:rsa", "dep:rand_core"]
 
 [dependencies]
