@@ -1,11 +1,11 @@
 //! Client certificates held by a PKCS #11 module: smart cards, tokens and SoftHSM.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, Ordering};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -61,7 +61,9 @@ fn lost(error: &CryptokiError) -> bool {
 struct Shared {
     context: Pkcs11,
     pin: Pin,
-    rejected: AtomicBool,
+    /// Serial numbers of the tokens that rejected a PIN. Held across the whole login, so two
+    /// threads cannot each send a wrong PIN.
+    rejected: Mutex<BTreeSet<String>>,
 }
 
 /// One token, found again by its serial number and label when its card is reinserted.
@@ -137,6 +139,14 @@ impl Token {
         {
             return Ok(true);
         }
+        let mut rejected = self
+            .shared
+            .rejected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if rejected.contains(&self.serial) {
+            return Err(Error::WrongPin);
+        }
         let pin_pad = self
             .shared
             .context
@@ -168,9 +178,6 @@ impl Token {
             PinAnswer::Keystore => None,
             PinAnswer::Secret(secret) => Some(AuthPin::new(secret.expose().into())),
         };
-        if self.shared.rejected.load(Ordering::SeqCst) {
-            return Err(Error::WrongPin);
-        }
         let user = if per_signature {
             UserType::ContextSpecific
         } else {
@@ -179,7 +186,7 @@ impl Token {
         match session.login(user, pin.as_ref()) {
             Ok(()) | Err(CryptokiError::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => Ok(true),
             Err(CryptokiError::Pkcs11(RvError::PinIncorrect, _)) => {
-                self.shared.rejected.store(true, Ordering::SeqCst);
+                rejected.insert(self.serial.clone());
                 Err(Error::WrongPin)
             }
             Err(error) => Err(failure(&error)),
@@ -308,7 +315,7 @@ impl Pkcs11Source {
         let shared = Arc::new(Shared {
             context,
             pin: self.pin.clone(),
-            rejected: AtomicBool::new(false),
+            rejected: Mutex::new(BTreeSet::new()),
         });
         *slot = Some(Arc::clone(&shared));
         Ok(shared)
@@ -632,10 +639,12 @@ impl KeyInner {
             match self.sign_once(&mut guard, scheme, message) {
                 Ok(signature) => return Ok(signature),
                 Err((error, session_lost)) => {
+                    // A failed signature leaves the session in an unknown state (an operation may
+                    // still be active): drop it.
+                    *guard = None;
                     if session_lost {
                         // A reinserted card invalidates sessions and handles: find the token
                         // again and reopen once.
-                        *guard = None;
                         if attempt == 0 && self.token.relocate().is_ok() {
                             continue;
                         }

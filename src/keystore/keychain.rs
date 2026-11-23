@@ -3,8 +3,8 @@
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, Ordering};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use rustls::SignatureScheme;
 use rustls::pki_types::CertificateDer;
@@ -31,7 +31,7 @@ use crate::select::IdentitySource;
 pub struct KeychainSource {
     keychain: Option<PathBuf>,
     pin: Pin,
-    rejected: AtomicBool,
+    rejected: Mutex<bool>,
 }
 
 impl KeychainSource {
@@ -53,11 +53,20 @@ impl KeychainSource {
         self
     }
 
-    fn open(&self, path: &Path) -> Result<SecKeychain, Error> {
+    /// Opens the keychain file; `true` when no password was given, so it may still be locked.
+    fn open(&self, path: &Path) -> Result<(SecKeychain, bool), Error> {
         // errSecAuthFailed
         const AUTH_FAILED: i32 = -25293;
         let mut keychain = SecKeychain::open(path)
             .map_err(|error| Error::Tls(Reason::new(alloc::format!("keychain: {error}"))))?;
+        // Held across the unlock, so two threads cannot each send a wrong password.
+        let mut rejected = self
+            .rejected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *rejected {
+            return Err(Error::WrongPin);
+        }
         let request = PinRequest::new(
             KeystoreKind::Keychain,
             path.display().to_string(),
@@ -66,17 +75,14 @@ impl KeychainSource {
             true,
         );
         let password = match self.pin.resolve(&request) {
-            PinAnswer::Decline => return Ok(keychain),
+            PinAnswer::Decline => return Ok((keychain, true)),
             PinAnswer::Keystore => None,
             PinAnswer::Secret(secret) => Some(secret),
         };
-        if self.rejected.load(Ordering::SeqCst) {
-            return Err(Error::WrongPin);
-        }
         match keychain.unlock(password.as_ref().map(Secret::expose)) {
-            Ok(()) => Ok(keychain),
+            Ok(()) => Ok((keychain, false)),
             Err(error) if error.code() == AUTH_FAILED => {
-                self.rejected.store(true, Ordering::SeqCst);
+                *rejected = true;
                 Err(Error::WrongPin)
             }
             Err(error) => Err(Error::Keystore {
@@ -96,14 +102,22 @@ impl IdentitySource for KeychainSource {
             .class(ItemClass::identity())
             .load_refs(true)
             .limit(Limit::All);
+        // A keychain left locked because no password was given must not make the system ask:
+        // the search is made with user interaction off.
+        let mut quiet = None;
         if let Some(path) = &self.keychain {
-            options.keychains(&[self.open(path)?]);
+            let (keychain, declined) = self.open(path)?;
+            if declined {
+                quiet = SecKeychain::disable_user_interaction().ok();
+            }
+            options.keychains(&[keychain]);
         }
         let results = match options.search() {
             Ok(results) => results,
             Err(error) if error.code() == NOT_FOUND => Vec::new(),
             Err(error) => return Err(Error::Tls(Reason::new(alloc::format!("keychain: {error}")))),
         };
+        drop(quiet);
         let mut found = Vec::new();
         for result in results {
             let SearchResult::Ref(Reference::Identity(identity)) = result else {

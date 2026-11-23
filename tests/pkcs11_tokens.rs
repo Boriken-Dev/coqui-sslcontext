@@ -11,7 +11,9 @@ mod support;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use coqui_sslcontext::{
     ClientCertificates, Error, IdentitySource, Pin, PinAnswer, PinPurpose, Pkcs11Source, Secret,
@@ -390,6 +392,70 @@ fn child() {
         world
             .handshake(world.source("no-pin", Pin::Keystore))
             .is_err()
+    );
+
+    // Two threads that each find a wrong PIN: the callback is asked once, because the first
+    // rejection is recorded before the second thread asks.
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counted = {
+        let asked = Arc::clone(&asked);
+        Pin::callback(move |_| {
+            asked.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(200));
+            PinAnswer::Secret(Secret::new("0000"))
+        })
+    };
+    let shared = Arc::new(world.source("main", counted));
+    let threads: Vec<_> = (0..2)
+        .map(|_| {
+            let source = Arc::clone(&shared);
+            std::thread::spawn(move || source.identities())
+        })
+        .collect();
+    for thread in threads {
+        assert!(matches!(thread.join().unwrap(), Err(Error::WrongPin)));
+    }
+    assert!(matches!(shared.identities(), Err(Error::WrongPin)));
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        1,
+        "the callback is not asked again"
+    );
+
+    // A login that fails in the middle of a signature leaves nothing active: the next one works.
+    let decline = Arc::new(AtomicBool::new(true));
+    let flaky = {
+        let decline = Arc::clone(&decline);
+        Pin::callback(move |request| {
+            if request.purpose() == PinPurpose::PerSignature && decline.load(Ordering::SeqCst) {
+                PinAnswer::Decline
+            } else {
+                PinAnswer::Secret(Secret::new(PIN))
+            }
+        })
+    };
+    let identity = world
+        .source("always-auth", flaky)
+        .identities()
+        .unwrap()
+        .remove(0);
+    let tls = Tls::builder()
+        .trust(Trust::Roots(vec![world.server_ca.der()]))
+        .client_certificates(ClientCertificates::Identity(identity))
+        .build()
+        .unwrap();
+    let get = || {
+        https_get(
+            tls.client_config("localhost").unwrap(),
+            world.server.addr,
+            "localhost",
+        )
+    };
+    assert!(get().is_err(), "the per-signature login was declined");
+    decline.store(false, Ordering::SeqCst);
+    assert!(
+        get().is_ok(),
+        "the session was not left with an active operation"
     );
 
     // asked: the callback is told the token, never a PIN, and that there is no PIN pad.

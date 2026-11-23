@@ -1,11 +1,11 @@
 //! Windows certificate stores: keys in CNG key storage providers (software, TPM, smart cards).
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use rustls::SignatureScheme;
@@ -31,7 +31,7 @@ pub struct CngSource {
     store: Arc<CertStore>,
     label: String,
     pin: Pin,
-    rejected: Arc<AtomicBool>,
+    rejected: Arc<Mutex<BTreeSet<[u8; 32]>>>,
 }
 
 impl CngSource {
@@ -69,7 +69,7 @@ impl CngSource {
             store,
             label: label.into(),
             pin: Pin::Keystore,
-            rejected: Arc::new(AtomicBool::new(false)),
+            rejected: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
 
@@ -123,7 +123,7 @@ struct LazyCngKey {
     info: CertificateInfo,
     store: String,
     pin: Pin,
-    rejected: Arc<AtomicBool>,
+    rejected: Arc<Mutex<BTreeSet<[u8; 32]>>>,
     signing: Mutex<Option<Arc<CngSigningKey>>>,
 }
 
@@ -144,7 +144,13 @@ impl LazyCngKey {
         message: &[u8],
     ) -> Result<Vec<u8>, rustls::Error> {
         let refused = |text: &str| rustls::Error::General(text.to_string());
-        if self.rejected.load(Ordering::SeqCst) {
+        // Held until the signature is made, so two threads cannot each send a wrong PIN.
+        let mut rejected = self
+            .rejected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fingerprint = *self.info.fingerprint();
+        if rejected.contains(&fingerprint) {
             return Err(refused("the key store rejected the PIN; it is not retried"));
         }
         let request = PinRequest::new(
@@ -154,6 +160,7 @@ impl LazyCngKey {
             PinPurpose::Sign,
             true,
         );
+        let mut sent = false;
         let key = match self.pin.resolve(&request) {
             PinAnswer::Decline => return Err(refused("the key needs a PIN and none was given")),
             PinAnswer::Keystore => self
@@ -165,10 +172,9 @@ impl LazyCngKey {
                     .context
                     .acquire_key(true)
                     .map_err(|_| refused("the key could not be opened"))?;
-                // From here a failure may be a wrong PIN: never send one again.
-                self.rejected.store(true, Ordering::SeqCst);
                 cng_pin::set_pin(&key, &secret)
                     .map_err(|_| refused("the key store did not take the PIN"))?;
+                sent = true;
                 key
             }
         };
@@ -176,10 +182,20 @@ impl LazyCngKey {
             .map_err(|_| refused("the key could not be used"))?
             .choose_scheme(&[scheme])
             .ok_or_else(|| refused("the key cannot sign with this scheme"))?;
-        let signature = signer.sign(message)?;
-        // The PIN worked: it may be sent again for the next signature.
-        self.rejected.store(false, Ordering::SeqCst);
-        Ok(signature)
+        match signer.sign(message) {
+            Ok(signature) => {
+                rejected.remove(&fingerprint);
+                Ok(signature)
+            }
+            Err(error) => {
+                // The provider reports a wrong PIN as an ordinary signing failure, so a failure
+                // after a PIN was sent counts as a rejection: it is not sent again for this key.
+                if sent {
+                    rejected.insert(fingerprint);
+                }
+                Err(error)
+            }
+        }
     }
 }
 
