@@ -223,7 +223,7 @@ pub fn rules_from_policy_values<'a>(
 ///
 /// # Errors
 ///
-/// [`Error::Credential`] when the bytes are not a property list.
+/// [`crate::Error::Credential`] when the bytes are not a property list.
 #[cfg(feature = "system")]
 #[cfg_attr(docsrs, doc(cfg(feature = "system")))]
 pub fn rules_from_plist(bytes: &[u8]) -> Result<Vec<AutoSelectRule>, crate::Error> {

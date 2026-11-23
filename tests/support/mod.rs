@@ -2,7 +2,7 @@
 
 #![allow(dead_code, reason = "each test binary uses part of the helpers")]
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "system"))]
 pub mod cng_store;
 pub mod pem;
 pub mod pki;

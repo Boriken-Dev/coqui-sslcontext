@@ -1,6 +1,6 @@
 //! Browser auto-select policy in its several carriers.
 
-use coqui_sslcontext::{AutoSelectRule, Error, NameFilter, rules_from_policy_values};
+use coqui_sslcontext::{AutoSelectRule, NameFilter, rules_from_policy_values};
 
 #[test]
 fn parsed_policy_values_become_rules_and_malformed_ones_are_skipped() {
@@ -21,9 +21,7 @@ fn parsed_policy_values_become_rules_and_malformed_ones_are_skipped() {
 
 #[cfg(feature = "system")]
 mod plist {
-    use coqui_sslcontext::rules_from_plist;
-
-    use super::*;
+    use coqui_sslcontext::{Error, rules_from_plist};
 
     const MANAGED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

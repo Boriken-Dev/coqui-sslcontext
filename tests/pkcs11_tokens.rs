@@ -273,7 +273,10 @@ impl World {
     }
 }
 
-fn recording(pin: &'static str, seen: &Arc<Mutex<Vec<(String, PinPurpose, bool)>>>) -> Pin {
+/// `(token, purpose, keystore_prompt)` of each PIN request a callback heard.
+type Heard = Arc<Mutex<Vec<(String, PinPurpose, bool)>>>;
+
+fn recording(pin: &'static str, seen: &Heard) -> Pin {
     let seen = Arc::clone(seen);
     Pin::callback(move |request| {
         seen.lock().unwrap().push((
