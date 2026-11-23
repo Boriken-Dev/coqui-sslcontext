@@ -57,7 +57,12 @@ fn unsafe_code_is_only_in_the_files_that_meet_a_system_boundary() {
             || line.contains("unsafe impl")
             || line.contains("unsafe extern")
     };
-    assert_eq!(holding("src", uses_unsafe), Vec::<String>::new());
+    // `rustls-cng` sets a smart card PIN with the wrong length and `security-framework` has no
+    // call that controls the Keychain prompt, so only the CNG PIN file needs `unsafe`.
+    assert_eq!(
+        holding("src", uses_unsafe),
+        vec!["src/keystore/cng_pin.rs".to_string()]
+    );
 }
 
 #[test]

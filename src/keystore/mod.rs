@@ -7,6 +7,12 @@ use crate::select::IdentitySource;
 
 #[cfg(all(windows, feature = "system"))]
 mod cng;
+#[cfg(all(windows, feature = "system"))]
+#[allow(
+    unsafe_code,
+    reason = "NCryptSetProperty with the PIN property; see the file"
+)]
+mod cng_pin;
 #[cfg(all(target_os = "macos", feature = "system"))]
 mod keychain;
 #[cfg(feature = "pkcs11")]

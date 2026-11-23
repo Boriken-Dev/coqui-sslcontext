@@ -22,7 +22,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = []
 # The operating system's keystores and the browsers' client-certificate policy: Windows CNG and the
 # registry, the macOS Keychain.
-system = ["dep:windows-registry", "dep:rustls-cng", "dep:security-framework"]
+system = ["dep:windows-registry", "dep:rustls-cng", "dep:security-framework", "dep:windows-sys"]
 # Client certificates held by a PKCS#11 module (smart cards, tokens, SoftHSM).
 pkcs11 = ["dep:cryptoki"]
 
@@ -42,12 +42,16 @@ thiserror = "2"
 # Diagnostics.
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 cryptoki = { version = "0.12", optional = true }
+# Wipes PINs and passwords from memory when they are dropped.
+zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
 # Windows certificate stores and CNG keys as rustls signing keys (feature `system`).
 rustls-cng = { version = "0.7", default-features = false, features = ["ring", "tls12"], optional = true }
 # Browser auto-select policy in the registry (feature `system`).
 windows-registry = { version = "0.6", optional = true }
+# Setting a smart card PIN on a CNG key (feature `system`).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The Keychain's identities as rustls signing keys (feature `system`).
@@ -58,6 +62,3 @@ security-framework = { version = "3", optional = true }
 rcgen = "0.14"
 p12-keystore = "0.4"
 tempfile = "3"
-
-[target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
