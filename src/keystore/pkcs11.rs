@@ -4,6 +4,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -23,7 +24,7 @@ use x509_cert::der::{Decode, Encode};
 
 use crate::error::{Error, Reason};
 use crate::identity::{CertificateInfo, Identity, KeyType};
-use crate::secret::Secret;
+use crate::pin::{KeystoreKind, Pin, PinAnswer, PinPurpose, PinRequest};
 use crate::select::IdentitySource;
 
 fn tls_error(error: impl fmt::Display) -> Error {
@@ -48,7 +49,8 @@ const SYSTEM_MODULES: [&str; 6] = [
 /// made by the module.
 pub struct Pkcs11Source {
     module: PathBuf,
-    pin: Option<Secret>,
+    pin: Pin,
+    rejected: AtomicBool,
     token_label: Option<String>,
     context: Mutex<Option<Pkcs11>>,
 }
@@ -71,9 +73,10 @@ pub struct Pkcs11SourceBuilder {
 }
 
 impl Pkcs11SourceBuilder {
-    /// The user PIN, to log in to each token.
-    pub fn pin(mut self, pin: Secret) -> Self {
-        self.source.pin = Some(pin);
+    /// Where the user PIN comes from, to log in to each token (a [`Secret`](crate::Secret) is a
+    /// PIN).
+    pub fn pin(mut self, pin: impl Into<Pin>) -> Self {
+        self.source.pin = pin.into();
         self
     }
 
@@ -95,7 +98,8 @@ impl Pkcs11Source {
         Pkcs11SourceBuilder {
             source: Self {
                 module: module.into(),
-                pin: None,
+                pin: Pin::None,
+                rejected: AtomicBool::new(false),
                 token_label: None,
                 context: Mutex::new(None),
             },
@@ -128,6 +132,29 @@ impl Pkcs11Source {
     }
 }
 
+impl Pkcs11Source {
+    /// Logs the user in as the source's [`Pin`] says. A rejected PIN is never sent again.
+    fn log_in(&self, session: &Session, token: &str) -> Result<(), Error> {
+        let request = PinRequest::new(KeystoreKind::Pkcs11, token, None, PinPurpose::List, true);
+        let pin = match self.pin.resolve(&request) {
+            PinAnswer::Decline => return Ok(()),
+            PinAnswer::Keystore => None,
+            PinAnswer::Secret(secret) => Some(AuthPin::new(secret.expose().into())),
+        };
+        if self.rejected.load(Ordering::SeqCst) {
+            return Err(Error::WrongPin);
+        }
+        match session.login(UserType::User, pin.as_ref()) {
+            Ok(()) | Err(CryptokiError::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => Ok(()),
+            Err(CryptokiError::Pkcs11(RvError::PinIncorrect, _)) => {
+                self.rejected.store(true, Ordering::SeqCst);
+                Err(Error::WrongPin)
+            }
+            Err(error) => Err(tls_error(error)),
+        }
+    }
+}
+
 impl IdentitySource for Pkcs11Source {
     fn identities(&self) -> Result<Vec<Identity>, Error> {
         let context = self.context()?;
@@ -142,12 +169,7 @@ impl IdentitySource for Pkcs11Source {
                 continue;
             }
             let session = context.open_ro_session(slot).map_err(tls_error)?;
-            if let Some(pin) = &self.pin {
-                match session.login(UserType::User, Some(&AuthPin::new(pin.expose().into()))) {
-                    Ok(()) | Err(CryptokiError::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => {}
-                    Err(error) => return Err(tls_error(error)),
-                }
-            }
+            self.log_in(&session, token.label().trim())?;
             let label = alloc::format!("pkcs11:{}", token.label().trim());
             let session = Arc::new(Mutex::new(session));
             found.extend(token_identities(&session, &label));
@@ -421,6 +443,7 @@ fn p1363_to_der(signature: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Secret;
 
     #[test]
     fn a_raw_ecdsa_signature_becomes_a_der_sequence_of_two_integers() {

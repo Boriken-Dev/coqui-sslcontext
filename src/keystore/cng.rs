@@ -1,9 +1,11 @@
 //! Windows certificate stores: keys in CNG key storage providers (software, TPM, smart cards).
 
-use alloc::string::ToString;
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use rustls::SignatureScheme;
@@ -13,15 +15,23 @@ use rustls_cng::cert::CertContext;
 use rustls_cng::signer::CngSigningKey;
 use rustls_cng::store::{CertStore, CertStoreType};
 
+use super::cng_pin;
 use crate::error::{Error, Reason};
-use crate::identity::{CertificateInfo, Identity, KeyType};
+use crate::identity::{CertificateInfo, Identity};
+use crate::pin::{KeystoreKind, Pin, PinAnswer, PinPurpose, PinRequest};
 use crate::select::IdentitySource;
 
 /// The certificates of a Windows store that have a private key.
+///
+/// A key is opened silently first. When it needs a PIN (a smart card), the source's [`Pin`] decides:
+/// a PIN is set on the key, [`Pin::Keystore`] lets Windows show its own dialog, and no PIN fails
+/// the signature at once. A PIN the key rejected is never sent again.
 #[derive(Debug)]
 pub struct CngSource {
     store: Arc<CertStore>,
     label: String,
+    pin: Pin,
+    rejected: Arc<AtomicBool>,
 }
 
 impl CngSource {
@@ -58,7 +68,15 @@ impl CngSource {
         Self {
             store,
             label: label.into(),
+            pin: Pin::Keystore,
+            rejected: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Where a smart card key's PIN comes from (default [`Pin::Keystore`]: Windows asks).
+    pub fn pin(mut self, pin: impl Into<Pin>) -> Self {
+        self.pin = pin.into();
+        self
     }
 }
 
@@ -84,7 +102,10 @@ impl IdentitySource for CngSource {
             };
             let key = Arc::new(LazyCngKey {
                 context,
-                key_type: info.key_type(),
+                info,
+                store: self.label.clone(),
+                pin: self.pin.clone(),
+                rejected: Arc::clone(&self.rejected),
                 signing: Mutex::new(None),
             });
             if let Ok(identity) = Identity::new(chain, key, self.label.clone()) {
@@ -99,7 +120,10 @@ impl IdentitySource for CngSource {
 /// smart card.
 struct LazyCngKey {
     context: CertContext,
-    key_type: KeyType,
+    info: CertificateInfo,
+    store: String,
+    pin: Pin,
+    rejected: Arc<AtomicBool>,
     signing: Mutex<Option<Arc<CngSigningKey>>>,
 }
 
@@ -107,8 +131,55 @@ impl fmt::Debug for LazyCngKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LazyCngKey")
-            .field("key_type", &self.key_type)
+            .field("key_type", &self.info.key_type())
             .finish_non_exhaustive()
+    }
+}
+
+impl LazyCngKey {
+    /// Signs `message` after the silent attempt failed, with the PIN the source's policy gives.
+    fn sign_with_pin(
+        &self,
+        scheme: SignatureScheme,
+        message: &[u8],
+    ) -> Result<Vec<u8>, rustls::Error> {
+        let refused = |text: &str| rustls::Error::General(text.to_string());
+        if self.rejected.load(Ordering::SeqCst) {
+            return Err(refused("the key store rejected the PIN; it is not retried"));
+        }
+        let request = PinRequest::new(
+            KeystoreKind::Cng,
+            self.store.clone(),
+            Some(self.info.clone()),
+            PinPurpose::Sign,
+            true,
+        );
+        let key = match self.pin.resolve(&request) {
+            PinAnswer::Decline => return Err(refused("the key needs a PIN and none was given")),
+            PinAnswer::Keystore => self
+                .context
+                .acquire_key(false)
+                .map_err(|_| refused("the key could not be opened"))?,
+            PinAnswer::Secret(secret) => {
+                let key = self
+                    .context
+                    .acquire_key(true)
+                    .map_err(|_| refused("the key could not be opened"))?;
+                // From here a failure may be a wrong PIN: never send one again.
+                self.rejected.store(true, Ordering::SeqCst);
+                cng_pin::set_pin(&key, &secret)
+                    .map_err(|_| refused("the key store did not take the PIN"))?;
+                key
+            }
+        };
+        let signer = CngSigningKey::new(key)
+            .map_err(|_| refused("the key could not be used"))?
+            .choose_scheme(&[scheme])
+            .ok_or_else(|| refused("the key cannot sign with this scheme"))?;
+        let signature = signer.sign(message)?;
+        // The PIN worked: it may be sent again for the next signature.
+        self.rejected.store(false, Ordering::SeqCst);
+        Ok(signature)
     }
 }
 
@@ -119,13 +190,55 @@ impl SigningKey for LazyCngKey {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if signing.is_none() {
-            let key = self.context.acquire_key(false).ok()?;
+            let key = self.context.acquire_key(true).ok()?;
             *signing = Some(Arc::new(CngSigningKey::new(key).ok()?));
         }
-        signing.as_ref()?.choose_scheme(offered)
+        let inner = signing.as_ref()?.choose_scheme(offered)?;
+        let scheme = inner.scheme();
+        Some(Box::new(CngSigner {
+            inner,
+            scheme,
+            key: Arc::new(LazyCngKey {
+                context: self.context.clone(),
+                info: self.info.clone(),
+                store: self.store.clone(),
+                pin: self.pin.clone(),
+                rejected: Arc::clone(&self.rejected),
+                signing: Mutex::new(None),
+            }),
+        }))
     }
 
     fn algorithm(&self) -> rustls::SignatureAlgorithm {
-        self.key_type.algorithm()
+        self.info.key_type().algorithm()
+    }
+}
+
+/// Signs silently, and with the PIN policy when the silent attempt failed.
+struct CngSigner {
+    inner: Box<dyn Signer>,
+    scheme: SignatureScheme,
+    key: Arc<LazyCngKey>,
+}
+
+impl fmt::Debug for CngSigner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CngSigner")
+            .field("scheme", &self.scheme)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Signer for CngSigner {
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
+        match self.inner.sign(message) {
+            Ok(signature) => Ok(signature),
+            Err(_) => self.key.sign_with_pin(self.scheme, message),
+        }
+    }
+
+    fn scheme(&self) -> SignatureScheme {
+        self.scheme
     }
 }

@@ -15,6 +15,7 @@ mod client;
 mod error;
 mod identity;
 pub mod keystore;
+mod pin;
 pub mod policy;
 mod secret;
 mod select;
@@ -28,6 +29,7 @@ pub use keystore::CngSource;
 pub use keystore::KeychainSource;
 #[cfg(feature = "pkcs11")]
 pub use keystore::{Pkcs11Source, Pkcs11SourceBuilder};
+pub use pin::{KeystoreKind, Pin, PinAnswer, PinCallback, PinPurpose, PinRequest};
 pub use policy::{
     AutoSelectRule, AutoSelectRuleBuilder, NameFilter, browser_policies, rules_from_policy,
 };
