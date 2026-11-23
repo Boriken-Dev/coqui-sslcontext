@@ -229,12 +229,14 @@ version = "0.0.0-alpha.0"
 dependencies = [
  "cryptoki",
  "p12-keystore",
+ "pkcs8",
  "rcgen",
  "rustls",
  "rustls-cng",
  "rustls-platform-verifier",
  "security-framework",
  "serde_json",
+ "sha1 0.10.7",
  "sha2 0.10.9",
  "tempfile",
  "thiserror",
@@ -723,7 +725,7 @@ dependencies = [
  "pkcs8",
  "rand",
  "rc2",
- "sha1",
+ "sha1 0.11.0",
  "sha2 0.11.1",
  "thiserror",
  "x509-parser",
@@ -789,7 +791,9 @@ dependencies = [
  "aes-gcm",
  "cbc",
  "der",
+ "getrandom 0.4.3",
  "pbkdf2",
+ "rand_core",
  "scrypt",
  "sha2 0.11.1",
  "spki",
@@ -802,6 +806,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
 dependencies = [
  "der",
+ "getrandom 0.4.3",
+ "pkcs5",
+ "rand_core",
  "spki",
 ]
 
@@ -1134,6 +1141,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]

@@ -1,23 +1,28 @@
 //! TLS that follows the system: servers verified by the operating system, and a client
 //! certificate from an operating-system keystore chosen as a browser would.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rustls::client::ResolvesClientCert;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::sign::CertifiedKey;
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 
 use crate::error::{Error, Reason};
 use crate::identity::Identity;
-use crate::select::Selector;
+use crate::keylog::key_log;
+use crate::pin::Pin;
+use crate::select::{IdentityQuery, Selector};
+use crate::settings::{KeyLogging, TlsSettings, TlsVersion};
 
 /// Who is trusted to vouch for a server.
 #[derive(Debug, Clone, Default)]
@@ -29,8 +34,52 @@ pub enum Trust {
     System,
     /// Only these root certificates, replacing the system's trust exactly.
     Roots(Vec<CertificateDer<'static>>),
+    /// Only the root certificates in this PEM file, or in every file of this directory, read when
+    /// the configuration is built.
+    Bundle(PathBuf),
     /// Nobody: no server is verified. Reported by [`Tls::non_defaults`].
     Disabled,
+}
+
+impl Trust {
+    /// [`Trust::Roots`] from PEM text holding certificates.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Credential`] when the text holds no certificate.
+    pub fn roots_from_pem(pem: &[u8]) -> Result<Self, Error> {
+        let roots: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(pem)
+            .collect::<Result<_, _>>()
+            .map_err(|_| Error::Credential(Reason::new("the certificate text is not PEM")))?;
+        if roots.is_empty() {
+            return Err(Error::Credential(Reason::new(
+                "the text holds no certificate",
+            )));
+        }
+        Ok(Self::Roots(roots))
+    }
+}
+
+/// The certificates of a PEM file, or of every file in a directory.
+fn bundle_roots(path: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {
+    let mut files = Vec::new();
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?.path();
+            if entry.is_file() {
+                files.push(entry);
+            }
+        }
+        files.sort();
+    } else {
+        files.push(path.to_path_buf());
+    }
+    let mut roots = Vec::new();
+    for file in files {
+        let bytes = std::fs::read(&file)?;
+        roots.extend(CertificateDer::pem_slice_iter(&bytes).filter_map(Result::ok));
+    }
+    Ok(roots)
 }
 
 /// What a client does when a server asks for a certificate.
@@ -46,6 +95,11 @@ pub enum ClientCertificates {
     Selector(Arc<Selector>),
     /// This identity, whatever the server asks.
     Identity(Identity),
+    /// These identities, the first whose key the server's signature schemes allow (one per key
+    /// type can coexist: an RSA and an EC certificate).
+    Identities(Vec<Identity>),
+    /// The best match for this query among the system's keystores, looked up at the first request.
+    Query(IdentityQuery),
 }
 
 /// A setting that is not the default, as data.
@@ -60,12 +114,28 @@ pub struct NonDefault {
 }
 
 /// Builds a [`Tls`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[must_use]
 pub struct TlsBuilder {
     trust: Trust,
     client_certificates: ClientCertificates,
     alpn: Vec<Vec<u8>>,
+    pin: Pin,
+    fallback: Option<Identity>,
+    settings: TlsSettings,
+}
+
+impl Default for TlsBuilder {
+    fn default() -> Self {
+        Self {
+            trust: Trust::default(),
+            client_certificates: ClientCertificates::default(),
+            alpn: Vec::new(),
+            pin: Pin::Keystore,
+            fallback: None,
+            settings: TlsSettings::default(),
+        }
+    }
 }
 
 impl TlsBuilder {
@@ -91,50 +161,127 @@ impl TlsBuilder {
         self
     }
 
+    /// Where a smart card key's PIN comes from, for the system's keystores (default
+    /// [`Pin::Keystore`], as a browser: the system asks). [`Pin::None`] never waits on a person.
+    pub fn pin(mut self, pin: impl Into<Pin>) -> Self {
+        self.pin = pin.into();
+        self
+    }
+
+    /// An identity sent when the keystores offer none that fits (default: none).
+    pub fn fallback_identity(mut self, identity: Identity) -> Self {
+        self.fallback = Some(identity);
+        self
+    }
+
+    /// The oldest protocol version offered (default TLS 1.2).
+    pub fn minimum_version(mut self, version: TlsVersion) -> Self {
+        self.settings.minimum_version = version;
+        self
+    }
+
+    /// The newest protocol version offered (default TLS 1.3).
+    pub fn maximum_version(mut self, version: TlsVersion) -> Self {
+        self.settings.maximum_version = version;
+        self
+    }
+
+    /// Where session secrets are logged for a traffic analyser (default nowhere).
+    pub fn key_log(mut self, logging: KeyLogging) -> Self {
+        self.settings.key_log = logging;
+        self
+    }
+
+    /// All the plain settings at once.
+    pub fn settings(mut self, settings: TlsSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
     /// The TLS configuration source.
     ///
     /// # Errors
     ///
-    /// [`Error::Tls`] when the operating system's verifier cannot start.
+    /// [`Error::Tls`] when the operating system's verifier cannot start, no root certificate can
+    /// be read or the versions leave none to offer; [`Error::Io`] when a bundle or key log file
+    /// cannot be read or opened.
     pub fn build(self) -> Result<Tls, Error> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let versions = protocol_versions(&self.settings)?;
         let verifier: Arc<dyn ServerCertVerifier> = match &self.trust {
             Trust::System => Arc::new(
                 rustls_platform_verifier::Verifier::new(Arc::clone(&provider))
                     .map_err(|error| Error::Tls(Reason::new(error.to_string())))?,
             ),
-            Trust::Roots(roots) => {
-                let mut store = RootCertStore::empty();
-                let (added, _ignored) = store.add_parsable_certificates(roots.iter().cloned());
-                if added == 0 {
-                    return Err(Error::Tls(Reason::new("no root certificate could be read")));
-                }
-                rustls::client::WebPkiServerVerifier::builder_with_provider(
-                    Arc::new(store),
-                    Arc::clone(&provider),
-                )
-                .build()
-                .map_err(|error| Error::Tls(Reason::new(error.to_string())))?
-            }
+            Trust::Roots(roots) => roots_verifier(roots, &provider)?,
+            Trust::Bundle(path) => roots_verifier(&bundle_roots(path)?, &provider)?,
             Trust::Disabled => {
                 Arc::new(DisabledVerifier(provider.signature_verification_algorithms))
             }
         };
         let selector = match &self.client_certificates {
-            ClientCertificates::System => Some(Arc::new(Selector::system())),
+            ClientCertificates::System | ClientCertificates::Query(_) => {
+                Some(Arc::new(Selector::system_builder(&self.pin).build()))
+            }
             ClientCertificates::Selector(selector) => Some(Arc::clone(selector)),
-            ClientCertificates::None | ClientCertificates::Identity(_) => None,
+            ClientCertificates::None
+            | ClientCertificates::Identity(_)
+            | ClientCertificates::Identities(_) => None,
         };
+        let key_log = key_log(&self.settings.key_log)?;
         Ok(Tls {
             provider,
             verifier,
+            versions,
             trust: self.trust,
             client_certificates: self.client_certificates,
             selector,
             alpn: self.alpn,
-            configs: Mutex::new(BTreeMap::new()),
+            fallback: self.fallback.map(|identity| identity.certified_key()),
+            settings: self.settings,
+            key_log,
+            configs: Mutex::new(VecDeque::new()),
         })
     }
+}
+
+fn roots_verifier(
+    roots: &[CertificateDer<'static>],
+    provider: &Arc<CryptoProvider>,
+) -> Result<Arc<dyn ServerCertVerifier>, Error> {
+    let mut store = RootCertStore::empty();
+    let (added, _ignored) = store.add_parsable_certificates(roots.iter().cloned());
+    if added == 0 {
+        return Err(Error::Tls(Reason::new("no root certificate could be read")));
+    }
+    Ok(rustls::client::WebPkiServerVerifier::builder_with_provider(
+        Arc::new(store),
+        Arc::clone(provider),
+    )
+    .build()
+    .map_err(|error| Error::Tls(Reason::new(error.to_string())))?)
+}
+
+fn protocol_versions(
+    settings: &TlsSettings,
+) -> Result<Vec<&'static rustls::SupportedProtocolVersion>, Error> {
+    let mut versions = Vec::new();
+    if settings.minimum_version <= TlsVersion::Tls12
+        && TlsVersion::Tls12 <= settings.maximum_version
+    {
+        versions.push(&rustls::version::TLS12);
+    }
+    if settings.minimum_version <= TlsVersion::Tls13
+        && TlsVersion::Tls13 <= settings.maximum_version
+    {
+        versions.push(&rustls::version::TLS13);
+    }
+    if versions.is_empty() {
+        return Err(Error::Tls(Reason::new(
+            "the minimum TLS version is above the maximum",
+        )));
+    }
+    Ok(versions)
 }
 
 /// Makes TLS client configurations that verify servers as the system does and answer certificate
@@ -145,11 +292,15 @@ impl TlsBuilder {
 pub struct Tls {
     provider: Arc<CryptoProvider>,
     verifier: Arc<dyn ServerCertVerifier>,
+    versions: Vec<&'static rustls::SupportedProtocolVersion>,
     trust: Trust,
     client_certificates: ClientCertificates,
     selector: Option<Arc<Selector>>,
     alpn: Vec<Vec<u8>>,
-    configs: Mutex<BTreeMap<String, Arc<ClientConfig>>>,
+    fallback: Option<Arc<CertifiedKey>>,
+    settings: TlsSettings,
+    key_log: Option<Arc<dyn rustls::KeyLog>>,
+    configs: Mutex<VecDeque<(String, Arc<ClientConfig>)>>,
 }
 
 impl fmt::Debug for Tls {
@@ -158,6 +309,7 @@ impl fmt::Debug for Tls {
             .debug_struct("Tls")
             .field("trust", &self.trust)
             .field("client_certificates", &self.client_certificates)
+            .field("settings", &self.settings)
             .finish_non_exhaustive()
     }
 }
@@ -178,7 +330,19 @@ impl Tls {
                 default: "system",
             });
         }
+        if self.settings.key_log != KeyLogging::Off {
+            found.push(NonDefault {
+                setting: "key_log",
+                value: "on".into(),
+                default: "off",
+            });
+        }
         found
+    }
+
+    /// The plain settings this source was built with.
+    pub fn settings(&self) -> &TlsSettings {
+        &self.settings
     }
 
     /// The selector answering certificate requests, if any.
@@ -186,7 +350,8 @@ impl Tls {
         self.selector.as_ref()
     }
 
-    /// The client configuration for connections to `host`.
+    /// The client configuration for connections to `host`; an empty `host` makes the host-blind
+    /// configuration, where the choice of certificate is made from the server's request alone.
     ///
     /// # Errors
     ///
@@ -197,53 +362,181 @@ impl Tls {
             .configs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(config) = configs.get(&key) {
+        if let Some((_, config)) = configs.iter().find(|(name, _)| *name == key) {
             return Ok(Arc::clone(config));
         }
         let builder = ClientConfig::builder_with_provider(Arc::clone(&self.provider))
-            .with_safe_default_protocol_versions()
+            .with_protocol_versions(&self.versions)
             .map_err(|error| Error::Tls(Reason::new(error.to_string())))?
             .dangerous()
             .with_custom_certificate_verifier(Arc::clone(&self.verifier));
-        let mut config = match (&self.client_certificates, &self.selector) {
-            (ClientCertificates::Identity(identity), _) => {
-                builder.with_client_cert_resolver(Arc::new(OneIdentity {
-                    key: identity.certified_key(),
-                }))
-            }
-            (_, Some(selector)) => {
-                let name = Some(key.clone()).filter(|name| !name.is_empty());
-                builder.with_client_cert_resolver(selector.resolver(name))
-            }
-            _ => builder.with_no_client_auth(),
+        let name = Some(key.clone()).filter(|name| !name.is_empty());
+        let only_tls13 = self.versions.len() == 1
+            && self.versions[0].version == rustls::ProtocolVersion::TLSv1_3;
+        let version = only_tls13.then_some(TlsVersion::Tls13);
+        let primary: Option<Arc<dyn ResolvesClientCert>> =
+            match (&self.client_certificates, &self.selector) {
+                (ClientCertificates::Identity(identity), _) => Some(Arc::new(IdentityResolver {
+                    identities: alloc::vec![identity.clone()],
+                })),
+                (ClientCertificates::Identities(identities), _) => {
+                    Some(Arc::new(IdentityResolver {
+                        identities: identities.clone(),
+                    }))
+                }
+                (ClientCertificates::Query(query), Some(selector)) => {
+                    Some(Arc::new(QueryResolver {
+                        selector: Arc::clone(selector),
+                        query: query.clone(),
+                    }))
+                }
+                (_, Some(selector)) => Some(selector.resolver_for(name, version)),
+                _ => None,
+            };
+        let mut config = match (primary, &self.fallback) {
+            (None, None) => builder.with_no_client_auth(),
+            (primary, fallback) => builder.with_client_cert_resolver(Arc::new(WithFallback {
+                primary,
+                fallback: fallback.clone(),
+            })),
         };
         config.alpn_protocols.clone_from(&self.alpn);
+        if let Some(log) = &self.key_log {
+            config.key_log = Arc::clone(log);
+        }
         let config = Arc::new(config);
-        configs.insert(key, Arc::clone(&config));
+        while configs.len() >= self.settings.config_cache_capacity.max(1) {
+            configs.pop_front();
+        }
+        configs.push_back((key, Arc::clone(&config)));
         Ok(config)
     }
 }
 
-/// Answers every certificate request with one identity.
-struct OneIdentity {
-    key: Arc<CertifiedKey>,
+/// The client configuration of the system: the operating system's trust and the certificate a
+/// browser on this machine would send, chosen from the server's request alone (rustls does not
+/// tell a resolver the server's name; [`Tls::client_config`] with a host also remembers choices
+/// per host).
+///
+/// # Errors
+///
+/// [`Error::Tls`] when the operating system's verifier cannot start.
+pub fn client_config() -> Result<Arc<ClientConfig>, Error> {
+    Tls::builder().build()?.client_config("")
 }
 
-impl fmt::Debug for OneIdentity {
+/// Answers a certificate request with the first identity whose key the server can verify.
+struct IdentityResolver {
+    identities: Vec<Identity>,
+}
+
+impl fmt::Debug for IdentityResolver {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("OneIdentity")
+            .debug_struct("IdentityResolver")
+            .field("identities", &self.identities.len())
+            .finish()
+    }
+}
+
+impl ResolvesClientCert for IdentityResolver {
+    fn resolve(
+        &self,
+        root_hint_subjects: &[&[u8]],
+        sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
+        let authorities: Vec<Vec<u8>> = root_hint_subjects
+            .iter()
+            .map(|name| name.to_vec())
+            .collect();
+        let fits = |identity: &&Identity| identity.info().key_type().usable_with(sigschemes);
+        let usable: Vec<&Identity> = self.identities.iter().filter(fits).collect();
+        // One identity is sent whatever the server names; several are told apart by the CAs.
+        let chosen = if let [only] = self.identities.as_slice() {
+            Some(only)
+        } else {
+            usable
+                .iter()
+                .copied()
+                .find(|identity| {
+                    !authorities.is_empty() && identity.info().issued_under(&authorities)
+                })
+                .or_else(|| usable.first().copied())
+        };
+        chosen.map(Identity::certified_key)
+    }
+
+    fn has_certs(&self) -> bool {
+        !self.identities.is_empty()
+    }
+}
+
+/// Answers with the best match of a query among a selector's sources.
+#[derive(Debug)]
+struct QueryResolver {
+    selector: Arc<Selector>,
+    query: IdentityQuery,
+}
+
+impl ResolvesClientCert for QueryResolver {
+    fn resolve(
+        &self,
+        root_hint_subjects: &[&[u8]],
+        sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
+        let authorities: Vec<Vec<u8>> = root_hint_subjects
+            .iter()
+            .map(|name| name.to_vec())
+            .collect();
+        self.selector
+            .find(&self.query)
+            .into_iter()
+            .find(|identity| {
+                let info = identity.info();
+                info.client_auth()
+                    && info.key_type().usable_with(sigschemes)
+                    && info.issued_under(&authorities)
+            })
+            .map(|identity| identity.certified_key())
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
+/// The primary resolver's answer, or the fallback identity when it has none that the server can
+/// verify.
+struct WithFallback {
+    primary: Option<Arc<dyn ResolvesClientCert>>,
+    fallback: Option<Arc<CertifiedKey>>,
+}
+
+impl fmt::Debug for WithFallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WithFallback")
+            .field("fallback", &self.fallback.is_some())
             .finish_non_exhaustive()
     }
 }
 
-impl ResolvesClientCert for OneIdentity {
+impl ResolvesClientCert for WithFallback {
     fn resolve(
         &self,
-        _root_hint_subjects: &[&[u8]],
-        _sigschemes: &[SignatureScheme],
+        root_hint_subjects: &[&[u8]],
+        sigschemes: &[SignatureScheme],
     ) -> Option<Arc<CertifiedKey>> {
-        Some(Arc::clone(&self.key))
+        if let Some(primary) = &self.primary
+            && let Some(key) = primary.resolve(root_hint_subjects, sigschemes)
+        {
+            return Some(key);
+        }
+        let fallback = self.fallback.as_ref()?;
+        fallback
+            .key
+            .choose_scheme(sigschemes)
+            .map(|_| Arc::clone(fallback))
     }
 
     fn has_certs(&self) -> bool {

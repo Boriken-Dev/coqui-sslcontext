@@ -63,6 +63,18 @@ impl Ca {
         self.sign(Self::client_params(common_name))
     }
 
+    /// A client certificate on a P-384 key, so a client can hold two key types.
+    pub fn issue_client_p384(&self, common_name: &str) -> Leaf {
+        let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let certificate = Self::client_params(common_name)
+            .signed_by(&key, &self.issuer)
+            .unwrap();
+        Leaf {
+            chain: vec![certificate.der().clone(), self.der()],
+            key_pkcs8: key.serialize_der(),
+        }
+    }
+
     /// A client certificate whose validity ended in 2021.
     pub fn issue_expired_client(&self, common_name: &str) -> Leaf {
         let mut params = Self::client_params(common_name);

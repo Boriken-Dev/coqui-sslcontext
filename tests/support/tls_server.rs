@@ -30,6 +30,8 @@ pub struct TlsServer {
     pub addr: SocketAddr,
     /// The leaf certificate each connection presented, if any, in connection order.
     pub presented: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
+    /// The protocol version each connection negotiated, in connection order.
+    pub versions: Arc<Mutex<Vec<Option<rustls::ProtocolVersion>>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -40,9 +42,19 @@ impl TlsServer {
         client_roots: &[CertificateDer<'static>],
         auth: ClientAuth,
     ) -> Self {
+        Self::start_with(server, client_roots, auth, rustls::ALL_VERSIONS)
+    }
+
+    /// A server that speaks only `versions`.
+    pub fn start_with(
+        server: &Leaf,
+        client_roots: &[CertificateDer<'static>],
+        auth: ClientAuth,
+        versions: &[&'static rustls::SupportedProtocolVersion],
+    ) -> Self {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let builder = ServerConfig::builder_with_provider(Arc::clone(&provider))
-            .with_safe_default_protocol_versions()
+            .with_protocol_versions(versions)
             .unwrap();
         let builder = match auth {
             ClientAuth::Off => builder.with_no_client_auth(),
@@ -69,8 +81,10 @@ impl TlsServer {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let presented = Arc::new(Mutex::new(Vec::new()));
+        let versions = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let (presented_in, stop_in) = (Arc::clone(&presented), Arc::clone(&stop));
+        let versions_in = Arc::clone(&versions);
         let thread = thread::spawn(move || {
             for stream in listener.incoming() {
                 if stop_in.load(Ordering::SeqCst) {
@@ -78,12 +92,14 @@ impl TlsServer {
                 }
                 let Ok(stream) = stream else { continue };
                 let (config, presented) = (Arc::clone(&config), Arc::clone(&presented_in));
-                thread::spawn(move || serve(stream, config, &presented));
+                let versions = Arc::clone(&versions_in);
+                thread::spawn(move || serve(stream, config, &presented, &versions));
             }
         });
         Self {
             addr,
             presented,
+            versions,
             stop,
             thread: Some(thread),
         }
@@ -104,7 +120,14 @@ impl Drop for TlsServer {
     }
 }
 
-fn serve(stream: TcpStream, config: Arc<ServerConfig>, presented: &Mutex<Vec<Option<Vec<u8>>>>) {
+type Versions = Mutex<Vec<Option<rustls::ProtocolVersion>>>;
+
+fn serve(
+    stream: TcpStream,
+    config: Arc<ServerConfig>,
+    presented: &Mutex<Vec<Option<Vec<u8>>>>,
+    versions: &Versions,
+) {
     stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
     let Ok(connection) = ServerConnection::new(config) else {
         return;
@@ -128,6 +151,7 @@ fn serve(stream: TcpStream, config: Arc<ServerConfig>, presented: &Mutex<Vec<Opt
     } else {
         "no client certificate"
     };
+    versions.lock().unwrap().push(tls.conn.protocol_version());
     presented.lock().unwrap().push(certificate);
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",

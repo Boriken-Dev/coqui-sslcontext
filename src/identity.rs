@@ -10,6 +10,7 @@ use rustls::SignatureScheme;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::sign::{CertifiedKey, SigningKey};
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use x509_cert::Certificate;
 use x509_cert::der::asn1::ObjectIdentifier;
@@ -87,6 +88,9 @@ pub struct CertificateInfo {
     key_type: KeyType,
     client_auth: bool,
     fingerprint: [u8; 32],
+    sha1: [u8; 20],
+    serial: Vec<u8>,
+    key_bits: u32,
     /// DER names the server may name as acceptable CAs: the leaf's issuer, and every subject and
     /// issuer in the rest of the chain.
     names: Vec<Vec<u8>>,
@@ -138,6 +142,7 @@ impl CertificateInfo {
         } else {
             return Err(bad("a key is of an unsupported type"));
         };
+        let key_bits = key_bits(key_type, key.subject_public_key.raw_bytes());
         let (mut extended, mut usage) = (None, None);
         if let Some(extensions) = tbs.extensions() {
             for extension in extensions {
@@ -187,6 +192,9 @@ impl CertificateInfo {
             key_type,
             client_auth,
             fingerprint: Sha256::digest(leaf_der.as_ref()).into(),
+            sha1: Sha1::digest(leaf_der.as_ref()).into(),
+            serial: tbs.serial_number().as_bytes().to_vec(),
+            key_bits,
             names,
         })
     }
@@ -199,6 +207,11 @@ impl CertificateInfo {
     /// The issuer, as an RFC 4514 string.
     pub fn issuer(&self) -> &str {
         &self.issuer
+    }
+
+    /// The start of the validity period.
+    pub fn not_before(&self) -> SystemTime {
+        self.not_before
     }
 
     /// The end of the validity period.
@@ -220,6 +233,31 @@ impl CertificateInfo {
     /// The SHA-256 digest of the certificate, which identifies it.
     pub fn fingerprint(&self) -> &[u8; 32] {
         &self.fingerprint
+    }
+
+    /// The serial number, big-endian, as the certificate encodes it.
+    pub fn serial(&self) -> &[u8] {
+        &self.serial
+    }
+
+    /// The SHA-256 digest of the certificate (the same as [`fingerprint`](Self::fingerprint)).
+    pub fn sha256(&self) -> &[u8; 32] {
+        &self.fingerprint
+    }
+
+    /// The SHA-1 digest of the certificate, which Windows calls its thumbprint.
+    pub fn sha1(&self) -> &[u8; 20] {
+        &self.sha1
+    }
+
+    /// The size of the public key in bits: the RSA modulus, the curve's field, 256 for Ed25519.
+    pub fn key_bits(&self) -> u32 {
+        self.key_bits
+    }
+
+    /// Whether the certificate is within its validity period now.
+    pub fn valid_now(&self) -> bool {
+        self.valid_at(SystemTime::now())
     }
 
     /// Whether `now` is within the validity period.
@@ -308,4 +346,45 @@ impl Identity {
     pub(crate) fn certified_key(&self) -> Arc<CertifiedKey> {
         Arc::new(CertifiedKey::new(self.chain.clone(), Arc::clone(&self.key)))
     }
+}
+
+/// The bits of a public key, from its `subjectPublicKey` bytes.
+fn key_bits(key_type: KeyType, raw: &[u8]) -> u32 {
+    match key_type {
+        KeyType::EcP256 | KeyType::Ed25519 => 256,
+        KeyType::EcP384 => 384,
+        KeyType::EcP521 => 521,
+        KeyType::Rsa => rsa_modulus_bits(raw).unwrap_or(0),
+    }
+}
+
+/// The length and header size of the DER element at the start of `bytes`.
+fn der_element(bytes: &[u8]) -> Option<(usize, usize)> {
+    let first = *bytes.get(1)?;
+    if first < 0x80 {
+        return Some((usize::from(first), 2));
+    }
+    let count = usize::from(first & 0x7f);
+    if count == 0 || count > 4 {
+        return None;
+    }
+    let length = bytes
+        .get(2..2 + count)?
+        .iter()
+        .fold(0usize, |total, byte| (total << 8) | usize::from(*byte));
+    Some((length, 2 + count))
+}
+
+/// The modulus size of an `RSAPublicKey` (`SEQUENCE { INTEGER modulus, INTEGER exponent }`).
+fn rsa_modulus_bits(raw: &[u8]) -> Option<u32> {
+    let (_, header) = der_element(raw)?;
+    let integer = raw.get(header..)?;
+    if *integer.first()? != 0x02 {
+        return None;
+    }
+    let (length, header) = der_element(integer)?;
+    let modulus = integer.get(header..header + length)?;
+    let modulus = &modulus[modulus.iter().position(|byte| *byte != 0)?..];
+    let bits = modulus.len() * 8 - modulus[0].leading_zeros() as usize;
+    u32::try_from(bits).ok()
 }

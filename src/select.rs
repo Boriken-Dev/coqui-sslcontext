@@ -13,9 +13,12 @@ use rustls::SignatureScheme;
 use rustls::client::ResolvesClientCert;
 use rustls::sign::CertifiedKey;
 
-use crate::error::Error;
+use crate::error::{Error, Reason};
 use crate::identity::Identity;
+use crate::identity::KeyType;
+use crate::pin::Pin;
 use crate::policy::{AutoSelectRule, browser_policies};
+use crate::settings::{SelectorSettings, TlsVersion};
 
 /// Where identities come from: a keystore, a smart card, a file.
 pub trait IdentitySource: Send + Sync + fmt::Debug {
@@ -26,6 +29,150 @@ pub trait IdentitySource: Send + Sync + fmt::Debug {
     ///
     /// Whatever stops the keystore being read.
     fn identities(&self) -> Result<Vec<Identity>, Error>;
+
+    /// The identities matching `query`, the one expiring last first.
+    ///
+    /// # Errors
+    ///
+    /// Whatever stops the keystore being read.
+    fn find(&self, query: &IdentityQuery) -> Result<Vec<Identity>, Error> {
+        let mut found: Vec<Identity> = self
+            .identities()?
+            .into_iter()
+            .filter(|identity| query.matches(identity))
+            .collect();
+        found.sort_by_key(|identity| core::cmp::Reverse(identity.info().not_after()));
+        Ok(found)
+    }
+
+    /// The best match for `query`: of several, the one that expires last, so a renewed certificate
+    /// wins over the one it replaces.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotFound`] when nothing matches, or whatever stops the keystore being read.
+    fn find_one(&self, query: &IdentityQuery) -> Result<Identity, Error> {
+        self.find(query)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::NotFound(Reason::new("no identity matches the query")))
+    }
+
+    /// Releases what the source holds open (a token session, a store). Dropping does the same;
+    /// the default does nothing.
+    fn close(&self) {}
+}
+
+/// What to look for among identities: every criterion given must match.
+///
+/// A thumbprint is the certificate's SHA-1 or SHA-256 in hex (case, spaces and colons ignored). A
+/// subject or issuer matches a case-insensitive substring of the RFC 4514 name; a label matches
+/// the keystore's own name for the entry exactly, ignoring case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityQuery {
+    thumbprint: Option<String>,
+    subject: Option<String>,
+    issuer: Option<String>,
+    label: Option<String>,
+    valid_only: bool,
+}
+
+impl Default for IdentityQuery {
+    fn default() -> Self {
+        Self {
+            thumbprint: None,
+            subject: None,
+            issuer: None,
+            label: None,
+            valid_only: true,
+        }
+    }
+}
+
+/// Builds an [`IdentityQuery`].
+#[derive(Debug, Clone, Default)]
+#[must_use]
+pub struct IdentityQueryBuilder {
+    query: IdentityQuery,
+}
+
+impl IdentityQueryBuilder {
+    /// The certificate's SHA-1 or SHA-256 in hex.
+    pub fn thumbprint(mut self, thumbprint: impl Into<String>) -> Self {
+        self.query.thumbprint = Some(thumbprint.into());
+        self
+    }
+
+    /// Text found in the subject, without regard to case.
+    pub fn subject(mut self, subject: impl Into<String>) -> Self {
+        self.query.subject = Some(subject.into());
+        self
+    }
+
+    /// Text found in the issuer, without regard to case.
+    pub fn issuer(mut self, issuer: impl Into<String>) -> Self {
+        self.query.issuer = Some(issuer.into());
+        self
+    }
+
+    /// The keystore's name for the entry.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.query.label = Some(label.into());
+        self
+    }
+
+    /// Keep only certificates valid now (default `true`).
+    pub fn valid_only(mut self, valid_only: bool) -> Self {
+        self.query.valid_only = valid_only;
+        self
+    }
+
+    /// The query.
+    pub fn build(self) -> IdentityQuery {
+        self.query
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use core::fmt::Write;
+    bytes.iter().fold(String::new(), |mut text, byte| {
+        let _ = write!(text, "{byte:02x}");
+        text
+    })
+}
+
+impl IdentityQuery {
+    /// Starts a query that matches every valid identity.
+    pub fn builder() -> IdentityQueryBuilder {
+        IdentityQueryBuilder::default()
+    }
+
+    /// Whether `identity` satisfies every criterion.
+    pub fn matches(&self, identity: &Identity) -> bool {
+        let info = identity.info();
+        if let Some(wanted) = &self.thumbprint {
+            let wanted: String = wanted
+                .chars()
+                .filter(|character| !matches!(character, ':' | ' '))
+                .map(|character| character.to_ascii_lowercase())
+                .collect();
+            if wanted != hex(info.sha1()) && wanted != hex(info.sha256()) {
+                return false;
+            }
+        }
+        let contains = |text: &str, wanted: &Option<String>| {
+            wanted
+                .as_ref()
+                .is_none_or(|wanted| text.to_lowercase().contains(&wanted.to_lowercase()))
+        };
+        contains(info.subject(), &self.subject)
+            && contains(info.issuer(), &self.issuer)
+            && self
+                .label
+                .as_ref()
+                .is_none_or(|label| label.eq_ignore_ascii_case(identity.label()))
+            && (!self.valid_only || info.valid_now())
+    }
 }
 
 impl IdentitySource for Identity {
@@ -46,6 +193,7 @@ pub struct CertificateRequest {
     host: Option<String>,
     authorities: Vec<Vec<u8>>,
     signature_schemes: Vec<SignatureScheme>,
+    tls_version: Option<TlsVersion>,
 }
 
 impl CertificateRequest {
@@ -60,7 +208,69 @@ impl CertificateRequest {
             host,
             authorities,
             signature_schemes,
+            tls_version: None,
         }
+    }
+
+    /// The same request, knowing the TLS version it will be answered in.
+    #[must_use]
+    pub fn with_tls_version(mut self, version: Option<TlsVersion>) -> Self {
+        self.tls_version = version;
+        self
+    }
+
+    /// The names of the CAs the server accepts, as RFC 4514 strings (a name that does not decode
+    /// is skipped).
+    pub fn authority_names(&self) -> Vec<String> {
+        use x509_cert::der::Decode;
+        self.authorities
+            .iter()
+            .filter_map(|der| x509_cert::name::Name::from_der(der).ok())
+            .map(|name| name.to_string())
+            .collect()
+    }
+
+    /// The key types the server can verify, from its signature schemes.
+    pub fn key_types(&self) -> Vec<KeyType> {
+        [
+            KeyType::Rsa,
+            KeyType::EcP256,
+            KeyType::EcP384,
+            KeyType::EcP521,
+            KeyType::Ed25519,
+        ]
+        .into_iter()
+        .filter(|key_type| key_type.usable_with(&self.signature_schemes))
+        .collect()
+    }
+
+    /// Whether the server accepts RSA signatures only as PSS (it offers no PKCS#1 v1.5 scheme),
+    /// as TLS 1.3 requires.
+    pub fn rsa_pss_required(&self) -> bool {
+        let offers =
+            |wanted: fn(&SignatureScheme) -> bool| self.signature_schemes.iter().any(wanted);
+        offers(|scheme| {
+            matches!(
+                scheme,
+                SignatureScheme::RSA_PSS_SHA256
+                    | SignatureScheme::RSA_PSS_SHA384
+                    | SignatureScheme::RSA_PSS_SHA512
+            )
+        }) && !offers(|scheme| {
+            matches!(
+                scheme,
+                SignatureScheme::RSA_PKCS1_SHA256
+                    | SignatureScheme::RSA_PKCS1_SHA384
+                    | SignatureScheme::RSA_PKCS1_SHA512
+            )
+        })
+    }
+
+    /// The TLS version the request will be answered in, when it is known: `Some(Tls13)` only when
+    /// the configuration allows TLS 1.3 alone (rustls does not tell a resolver the version it
+    /// negotiated); otherwise `None`.
+    pub fn tls_version(&self) -> Option<TlsVersion> {
+        self.tls_version
     }
 
     /// The server name the client sent (SNI), if any.
@@ -104,6 +314,7 @@ pub struct Selector {
     browser_policy: bool,
     remember: bool,
     cache_ttl: Duration,
+    remembered_capacity: usize,
     state: Mutex<State>,
 }
 
@@ -162,6 +373,21 @@ impl SelectorBuilder {
         self
     }
 
+    /// How many hosts' choices are remembered (default 256); the oldest is forgotten beyond it.
+    pub fn remembered_capacity(mut self, capacity: usize) -> Self {
+        self.selector.remembered_capacity = capacity;
+        self
+    }
+
+    /// All the plain settings at once.
+    pub fn settings(mut self, settings: SelectorSettings) -> Self {
+        self.selector.cache_ttl = settings.cache_ttl;
+        self.selector.remember = settings.remember;
+        self.selector.browser_policy = settings.browser_policy;
+        self.selector.remembered_capacity = settings.remembered_capacity;
+        self
+    }
+
     /// The selector.
     pub fn build(self) -> Selector {
         self.selector
@@ -179,6 +405,7 @@ impl Selector {
                 browser_policy: false,
                 remember: true,
                 cache_ttl: Duration::from_secs(60),
+                remembered_capacity: SelectorSettings::DEFAULT_REMEMBERED,
                 state: Mutex::new(State {
                     listed: None,
                     policies: None,
@@ -191,12 +418,21 @@ impl Selector {
     /// The selector a browser on this system would use: the operating system's keystore (Windows
     /// CNG, the macOS Keychain, PKCS#11's default module where there is one) and the browsers'
     /// auto-select policies.
+    ///
+    /// A smart card's PIN is asked of the keystore itself, as a browser does
+    /// ([`Pin::Keystore`]); [`system_builder`](Self::system_builder) takes another source.
     pub fn system() -> Self {
+        Self::system_builder(&Pin::Keystore).build()
+    }
+
+    /// The builder of [`system`](Self::system), with `pin` giving smart card PINs: [`Pin::None`]
+    /// never waits on a person, and keys that need a PIN fail instead.
+    pub fn system_builder(pin: &Pin) -> SelectorBuilder {
         let mut builder = Self::builder().browser_policy(true);
-        for source in crate::keystore::system_sources() {
+        for source in crate::keystore::system_sources(pin) {
             builder.selector.sources.push(source);
         }
-        builder.build()
+        builder
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -225,7 +461,9 @@ impl Selector {
         listed
     }
 
-    fn policies(&self) -> Vec<AutoSelectRule> {
+    /// The browsers' auto-select rules, read at most every cache interval; none unless
+    /// [`SelectorBuilder::browser_policy`] is on.
+    pub fn policies(&self) -> Vec<AutoSelectRule> {
         if !self.browser_policy {
             return Vec::new();
         }
@@ -256,6 +494,17 @@ impl Selector {
             }
             None => state.remembered.clear(),
         }
+    }
+
+    /// The identities of every source matching `query`, the one expiring last first.
+    pub fn find(&self, query: &IdentityQuery) -> Vec<Identity> {
+        let mut found: Vec<Identity> = self
+            .identities()
+            .into_iter()
+            .filter(|identity| query.matches(identity))
+            .collect();
+        found.sort_by_key(|identity| core::cmp::Reverse(identity.info().not_after()));
+        found
     }
 
     /// The identities a browser would offer for `request`, the one expiring last first.
@@ -316,7 +565,14 @@ impl Selector {
             }
         });
         if let (Some(identity), Some(host), true) = (&chosen, host, self.remember) {
-            self.state()
+            let mut state = self.state();
+            if !state.remembered.contains_key(&host)
+                && state.remembered.len() >= self.remembered_capacity.max(1)
+                && let Some(oldest) = state.remembered.keys().next().cloned()
+            {
+                state.remembered.remove(&oldest);
+            }
+            state
                 .remembered
                 .insert(host, *identity.info().fingerprint());
         }
@@ -325,9 +581,20 @@ impl Selector {
 
     /// A `rustls` resolver that answers for connections to `host`.
     pub fn resolver(self: &Arc<Self>, host: Option<String>) -> Arc<dyn ResolvesClientCert> {
+        self.resolver_for(host, None)
+    }
+
+    /// Like [`resolver`](Self::resolver), telling each request the TLS version it will be
+    /// answered in ([`CertificateRequest::tls_version`]).
+    pub fn resolver_for(
+        self: &Arc<Self>,
+        host: Option<String>,
+        version: Option<TlsVersion>,
+    ) -> Arc<dyn ResolvesClientCert> {
         Arc::new(HostResolver {
             selector: Arc::clone(self),
             host,
+            version,
         })
     }
 }
@@ -336,6 +603,7 @@ impl Selector {
 struct HostResolver {
     selector: Arc<Selector>,
     host: Option<String>,
+    version: Option<TlsVersion>,
 }
 
 impl ResolvesClientCert for HostResolver {
@@ -351,7 +619,8 @@ impl ResolvesClientCert for HostResolver {
                 .map(|name| name.to_vec())
                 .collect(),
             sigschemes.to_vec(),
-        );
+        )
+        .with_tls_version(self.version);
         let identity = self.selector.select(&request)?;
         tracing::debug!(host = ?self.host, subject = identity.info().subject(), "answering a certificate request");
         Some(identity.certified_key())
