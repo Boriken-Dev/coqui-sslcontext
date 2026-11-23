@@ -1,16 +1,22 @@
 //! The macOS Keychain: identities in the user's keychains and on smart cards.
 
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
 
 use rustls::SignatureScheme;
 use rustls::pki_types::CertificateDer;
 use rustls::sign::{Signer, SigningKey};
 use security_framework::item::{ItemClass, ItemSearchOptions, Limit, Reference, SearchResult};
 use security_framework::key::{Algorithm, SecKey};
+use security_framework::os::macos::keychain::SecKeychain;
 
 use crate::error::{Error, Reason};
 use crate::identity::{CertificateInfo, Identity, KeyType};
+use crate::pin::{KeystoreKind, Pin, PinAnswer, PinPurpose, PinRequest};
+use crate::secret::Secret;
 use crate::select::IdentitySource;
 
 /// The identities (certificate and private key) the Keychain holds.
@@ -18,9 +24,14 @@ use crate::select::IdentitySource;
 /// The key stays in the Keychain, the Secure Enclave or on the card: each signature is made by the
 /// Security framework, which asks the person for permission where the key's access control says so.
 /// Only the leaf certificate is sent; a server that needs an intermediate must have it.
+///
+/// A keychain file given with [`keychain`](Self::keychain) is unlocked with the source's [`Pin`]
+/// (its password): a password the keychain rejected is not sent again.
 #[derive(Debug, Default)]
 pub struct KeychainSource {
-    _private: (),
+    keychain: Option<PathBuf>,
+    pin: Pin,
+    rejected: AtomicBool,
 }
 
 impl KeychainSource {
@@ -28,18 +39,67 @@ impl KeychainSource {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Only the keychain file at `path`, unlocked when it is locked.
+    pub fn keychain(mut self, path: impl Into<PathBuf>) -> Self {
+        self.keychain = Some(path.into());
+        self
+    }
+
+    /// Where the keychain's password comes from (default [`Pin::None`]: a locked keychain stays
+    /// closed and is not listed; [`Pin::Keystore`] lets the system ask).
+    pub fn pin(mut self, pin: impl Into<Pin>) -> Self {
+        self.pin = pin.into();
+        self
+    }
+
+    fn open(&self, path: &Path) -> Result<SecKeychain, Error> {
+        // errSecAuthFailed
+        const AUTH_FAILED: i32 = -25293;
+        let mut keychain = SecKeychain::open(path)
+            .map_err(|error| Error::Tls(Reason::new(alloc::format!("keychain: {error}"))))?;
+        let request = PinRequest::new(
+            KeystoreKind::Keychain,
+            path.display().to_string(),
+            None,
+            PinPurpose::List,
+            true,
+        );
+        let password = match self.pin.resolve(&request) {
+            PinAnswer::Decline => return Ok(keychain),
+            PinAnswer::Keystore => None,
+            PinAnswer::Secret(secret) => Some(secret),
+        };
+        if self.rejected.load(Ordering::SeqCst) {
+            return Err(Error::WrongPin);
+        }
+        match keychain.unlock(password.as_ref().map(Secret::expose)) {
+            Ok(()) => Ok(keychain),
+            Err(error) if error.code() == AUTH_FAILED => {
+                self.rejected.store(true, Ordering::SeqCst);
+                Err(Error::WrongPin)
+            }
+            Err(error) => Err(Error::Keystore {
+                code: Some(i64::from(error.code())),
+                reason: Reason::new("the keychain could not be unlocked"),
+            }),
+        }
+    }
 }
 
 impl IdentitySource for KeychainSource {
     fn identities(&self) -> Result<Vec<Identity>, Error> {
         // errSecItemNotFound: a keychain with no identity is an empty list, not a failure.
         const NOT_FOUND: i32 = -25300;
-        let results = match ItemSearchOptions::new()
+        let mut options = ItemSearchOptions::new();
+        options
             .class(ItemClass::identity())
             .load_refs(true)
-            .limit(Limit::All)
-            .search()
-        {
+            .limit(Limit::All);
+        if let Some(path) = &self.keychain {
+            options.keychains(&[self.open(path)?]);
+        }
+        let results = match options.search() {
             Ok(results) => results,
             Err(error) if error.code() == NOT_FOUND => Vec::new(),
             Err(error) => return Err(Error::Tls(Reason::new(alloc::format!("keychain: {error}")))),
