@@ -25,7 +25,10 @@ fn pem_chain(text: &[u8]) -> Result<Vec<CertificateDer<'static>>, Error> {
 }
 
 /// The private key of PEM text, decrypting an encrypted PKCS#8 key with `password`.
-fn pem_private_key(text: &[u8], password: &KeyPassword) -> Result<PrivateKeyDer<'static>, Error> {
+pub(crate) fn pem_private_key(
+    text: &[u8],
+    password: &KeyPassword,
+) -> Result<PrivateKeyDer<'static>, Error> {
     if text
         .windows(29)
         .any(|window| window == b"BEGIN ENCRYPTED PRIVATE KEY--")

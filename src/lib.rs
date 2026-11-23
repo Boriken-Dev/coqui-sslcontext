@@ -14,6 +14,8 @@ extern crate alloc;
 mod client;
 mod error;
 mod identity;
+#[cfg(feature = "issue")]
+mod issue;
 mod keylog;
 pub mod keystore;
 mod load;
@@ -29,6 +31,11 @@ mod settings;
 pub use client::{ClientCertificates, NonDefault, Tls, TlsBuilder, Trust, client_config};
 pub use error::{Error, Reason};
 pub use identity::{CertificateInfo, Identity, KeyType};
+#[cfg(feature = "issue")]
+#[cfg_attr(docsrs, doc(cfg(feature = "issue")))]
+pub use issue::{
+    CertificateAuthority, CertificateAuthorityBuilder, IssuedCertificate, LeafBuilder,
+};
 #[cfg(all(windows, feature = "system"))]
 pub use keystore::CngSource;
 #[cfg(all(target_os = "macos", feature = "system"))]
@@ -47,4 +54,6 @@ pub use select::{
     SelectorBuilder,
 };
 pub use server::{ClientAuth, ServerTls, ServerTlsBuilder};
+#[cfg(feature = "issue")]
+pub use settings::IssueSettings;
 pub use settings::{KeyLogging, Pkcs11Settings, SelectorSettings, TlsSettings, TlsVersion};

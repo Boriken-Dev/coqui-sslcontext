@@ -107,6 +107,40 @@ impl Default for SelectorSettings {
     }
 }
 
+/// The settings of a [`CertificateAuthority`](crate::CertificateAuthority).
+#[cfg(feature = "issue")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IssueSettings {
+    /// How long a CA certificate is valid (default 3650 days).
+    pub ca_validity: Duration,
+    /// How long a leaf certificate is valid (default 30 days).
+    pub leaf_validity: Duration,
+    /// How far before now a certificate's validity starts, for clients with slow clocks
+    /// (default one hour).
+    pub backdate: Duration,
+    /// The kind of key made (default EC P-256).
+    pub key_type: crate::KeyType,
+    /// The size of an RSA key (default 2048 bits).
+    pub rsa_bits: u32,
+    /// How many CAs may sit below this CA (default 0).
+    pub path_len: u8,
+}
+
+#[cfg(feature = "issue")]
+impl Default for IssueSettings {
+    fn default() -> Self {
+        Self {
+            ca_validity: Duration::from_secs(3650 * 24 * 3600),
+            leaf_validity: Duration::from_secs(30 * 24 * 3600),
+            backdate: Duration::from_secs(3600),
+            key_type: crate::KeyType::EcP256,
+            rsa_bits: 2048,
+            path_len: 0,
+        }
+    }
+}
+
 /// The settings of a PKCS#11 source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
