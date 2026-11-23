@@ -10,7 +10,12 @@ use support::pki::Ca;
 use support::tls_server::{ClientAuth, TlsServer, https_get};
 
 #[test]
+#[ignore = "imports a key into an in-memory Windows store; run with COQUI_SSLCONTEXT_TEST_CNG=1 and --ignored"]
 fn a_certificate_and_key_held_by_a_windows_store_answer_a_servers_certificate_request() {
+    assert!(
+        std::env::var_os("COQUI_SSLCONTEXT_TEST_CNG").is_some(),
+        "set COQUI_SSLCONTEXT_TEST_CNG=1 to run this test"
+    );
     let server_ca = Ca::new("Server CA");
     let client_ca = Ca::new("Corp Client CA");
     let client = client_ca.issue_client("keystore-user");
@@ -22,7 +27,8 @@ fn a_certificate_and_key_held_by_a_windows_store_answer_a_servers_certificate_re
 
     let store = import(&client);
     let _keys = KeyGuard(Arc::clone(&store));
-    let source = CngSource::from_store(store, "test store");
+    // A software key signs silently, so no PIN is ever asked for: the policy can be none.
+    let source = CngSource::from_store(store, "test store").pin(coqui_sslcontext::Pin::None);
     // The store holds the leaf and its CA; only the leaf has a key.
     assert_eq!(source.identities().unwrap().len(), 1);
 
