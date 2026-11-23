@@ -268,3 +268,25 @@ fn an_exported_key_is_encrypted_when_a_password_is_given() {
         ));
     }
 }
+
+#[test]
+fn a_constraint_on_one_kind_of_name_excludes_the_other_kind() {
+    let dns_only = CertificateAuthority::builder("Dns Only")
+        .permitted(["corp.example"])
+        .create()
+        .unwrap();
+    assert!(handshake(&dns_only, &["host.corp.example"], "host.corp.example").is_ok());
+    assert!(
+        handshake(&dns_only, &["127.0.0.1"], "127.0.0.1").is_err(),
+        "a DNS-only CA must not vouch for an IP address"
+    );
+    let ip_only = CertificateAuthority::builder("Ip Only")
+        .permitted(["127.0.0.0/8"])
+        .create()
+        .unwrap();
+    assert!(handshake(&ip_only, &["127.0.0.1"], "127.0.0.1").is_ok());
+    assert!(
+        handshake(&ip_only, &["localhost"], "localhost").is_err(),
+        "an IP-only CA must not vouch for a DNS name"
+    );
+}

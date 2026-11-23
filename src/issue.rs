@@ -155,13 +155,33 @@ impl CertificateAuthorityBuilder {
         ];
         (params.not_before, params.not_after) = validity(&settings, settings.ca_validity)?;
         if !self.permitted.is_empty() {
+            let permitted: Vec<GeneralSubtree> = self
+                .permitted
+                .iter()
+                .map(|entry| subtree(entry))
+                .collect::<Result<_, _>>()?;
+            // A constraint limits only the kinds of name it lists, so a kind with no permitted
+            // entry is excluded whole: all IP addresses, or every DNS name.
+            let mut excluded = Vec::new();
+            if !permitted
+                .iter()
+                .any(|entry| matches!(entry, GeneralSubtree::IpAddress(_)))
+            {
+                for address in [IpAddr::from([0u8; 4]), IpAddr::from([0u8; 16])] {
+                    excluded.push(GeneralSubtree::IpAddress(CidrSubnet::from_addr_prefix(
+                        address, 0,
+                    )));
+                }
+            }
+            if !permitted
+                .iter()
+                .any(|entry| matches!(entry, GeneralSubtree::DnsName(_)))
+            {
+                excluded.push(GeneralSubtree::DnsName(String::new()));
+            }
             params.name_constraints = Some(NameConstraints {
-                permitted_subtrees: self
-                    .permitted
-                    .iter()
-                    .map(|entry| subtree(entry))
-                    .collect::<Result<_, _>>()?,
-                excluded_subtrees: Vec::new(),
+                permitted_subtrees: permitted,
+                excluded_subtrees: excluded,
             });
         }
         let key = generate_key(settings.key_type, settings.rsa_bits)?;
