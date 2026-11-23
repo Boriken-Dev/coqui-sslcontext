@@ -147,6 +147,7 @@ fn hex_digest(text: &str) -> Option<[u8; 32]> {
 pub(crate) struct PinningVerifier {
     pub(crate) inner: Arc<dyn ServerCertVerifier>,
     pub(crate) pins: Pins,
+    pub(crate) provider: Arc<rustls::crypto::CryptoProvider>,
 }
 
 impl fmt::Debug for PinningVerifier {
@@ -155,6 +156,34 @@ impl fmt::Debug for PinningVerifier {
             .debug_struct("PinningVerifier")
             .field("pins", &self.pins.digests.len())
             .finish_non_exhaustive()
+    }
+}
+
+impl PinningVerifier {
+    /// Whether `end_entity` verifies with `anchor` as the only trust anchor.
+    fn chains_to(
+        &self,
+        anchor: &CertificateDer<'_>,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        now: UnixTime,
+    ) -> bool {
+        let mut store = rustls::RootCertStore::empty();
+        if store.add(anchor.clone().into_owned()).is_err() {
+            return false;
+        }
+        rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(store),
+            Arc::clone(&self.provider),
+        )
+        .build()
+        .and_then(|verifier| {
+            verifier
+                .verify_server_cert(end_entity, intermediates, server_name, &[], now)
+                .map_err(|_| rustls::client::VerifierBuilderError::NoRootAnchors)
+        })
+        .is_ok()
     }
 }
 
@@ -174,9 +203,15 @@ impl ServerCertVerifier for PinningVerifier {
             ocsp_response,
             now,
         )?;
-        let pinned = core::iter::once(end_entity)
-            .chain(intermediates)
-            .any(|certificate| self.pins.matches(certificate.as_ref()));
+        // A pinned certificate counts when it is the leaf, or when the leaf chains to it: an
+        // unrelated pinned certificate appended to the chain proves nothing.
+        let pinned = self.pins.matches(end_entity.as_ref())
+            || intermediates
+                .iter()
+                .filter(|certificate| self.pins.matches(certificate.as_ref()))
+                .any(|certificate| {
+                    self.chains_to(certificate, end_entity, intermediates, server_name, now)
+                });
         if pinned {
             Ok(verified)
         } else {

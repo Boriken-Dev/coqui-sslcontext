@@ -174,3 +174,34 @@ fn pins_are_read_from_base64_hex_and_curl_forms_and_written_back() {
     assert!(!Pins::new().matches(b"not a certificate"));
     assert!(Pins::new().with_certificate(b"not a certificate").is_err());
 }
+
+#[test]
+fn a_pinned_certificate_appended_to_the_chain_does_not_satisfy_a_pin() {
+    let ca = Ca::new("Chain CA");
+    let unrelated = Ca::new("Public Intermediate");
+    let mut leaf = ca.issue_server("localhost");
+    leaf.chain.push(unrelated.der());
+    let server = TlsServer::start(&leaf, &[], ClientAuth::Off);
+    let tls = |pins: Pins| {
+        builder()
+            .trust(Trust::Roots(vec![ca.der()]))
+            .pins(pins)
+            .build()
+            .unwrap()
+    };
+    let appended = Pins::new()
+        .with_certificate(unrelated.der().as_ref())
+        .unwrap();
+    assert!(get(&tls(appended), &server, "localhost").is_err());
+    // The CA that really issued the leaf still satisfies a pin.
+    let issuer = Pins::new().with_certificate(ca.der().as_ref()).unwrap();
+    assert!(get(&tls(issuer), &server, "localhost").is_ok());
+}
+
+#[test]
+fn pins_beside_disabled_trust_are_refused() {
+    let leaf = self_signed(&["localhost"], false);
+    let pins = Pins::new().with_certificate(leaf.leaf_der()).unwrap();
+    let built = builder().trust(Trust::Disabled).pins(pins).build();
+    assert!(matches!(built, Err(Error::Tls(_))));
+}

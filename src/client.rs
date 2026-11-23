@@ -250,9 +250,17 @@ impl TlsBuilder {
             Some(pins) if pins.is_empty() => {
                 return Err(Error::Tls(Reason::new("no pin was given")));
             }
+            Some(_) if matches!(self.trust, Trust::Disabled) => {
+                // Handshake signatures are not checked when nothing is trusted, so a pin would
+                // protect nothing.
+                return Err(Error::Tls(Reason::new(
+                    "pins need a trust that verifies the server; use Trust::Pinned alone",
+                )));
+            }
             Some(pins) => Arc::new(PinningVerifier {
                 inner: verifier,
                 pins,
+                provider: Arc::clone(&provider),
             }),
             _ => verifier,
         };
