@@ -174,10 +174,21 @@ fn filter_from(value: Option<&serde_json::Value>) -> Option<NameFilter> {
 /// `{"pattern": "https://[*.]example.com", "filter": {"ISSUER": {"CN": "Corp CA"}}}`. A malformed
 /// entry is skipped, as the browsers skip it.
 pub fn rules_from_policy<'a>(entries: impl IntoIterator<Item = &'a str>) -> Vec<AutoSelectRule> {
-    entries
+    let values: Vec<serde_json::Value> = entries
         .into_iter()
-        .filter_map(|entry| {
-            let value: serde_json::Value = serde_json::from_str(entry).ok()?;
+        .filter_map(|entry| serde_json::from_str(entry).ok())
+        .collect();
+    rules_from_policy_values(&values)
+}
+
+/// Rules from policy entries already parsed, such as the objects of a managed JSON policy file.
+/// A malformed entry is skipped.
+pub fn rules_from_policy_values<'a>(
+    values: impl IntoIterator<Item = &'a serde_json::Value>,
+) -> Vec<AutoSelectRule> {
+    values
+        .into_iter()
+        .filter_map(|value| {
             let pattern = value.get("pattern")?.as_str()?;
             let spec = value.get("filter");
             let issuer = filter_from(spec.and_then(|spec| spec.get("ISSUER")))?;
@@ -192,23 +203,96 @@ pub fn rules_from_policy<'a>(entries: impl IntoIterator<Item = &'a str>) -> Vec<
         .collect()
 }
 
-#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+/// The `AutoSelectCertificateForUrls` entries of a macOS managed-preferences property list (XML
+/// or binary): each a JSON string, or a dictionary of the same shape.
+///
+/// # Errors
+///
+/// [`Error::Credential`] when the bytes are not a property list.
+#[cfg(feature = "system")]
+#[cfg_attr(docsrs, doc(cfg(feature = "system")))]
+pub fn rules_from_plist(bytes: &[u8]) -> Result<Vec<AutoSelectRule>, crate::Error> {
+    let value = plist::Value::from_reader(std::io::Cursor::new(bytes)).map_err(|_| {
+        crate::Error::Credential(crate::Reason::new("the property list does not parse"))
+    })?;
+    let entries: Vec<serde_json::Value> = value
+        .as_dictionary()
+        .and_then(|dictionary| dictionary.get(POLICY))
+        .and_then(plist::Value::as_array)
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|item| match item {
+                    plist::Value::String(text) => serde_json::from_str(text).ok(),
+                    plist::Value::Dictionary(_) => serde_json::to_value(item).ok(),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(rules_from_policy_values(&entries))
+}
+
+#[cfg(any(feature = "system", all(unix, not(target_os = "macos"))))]
 const POLICY: &str = "AutoSelectCertificateForUrls";
 
 /// The `AutoSelectCertificateForUrls` rules set for Edge, Chrome and Chromium on this machine,
 /// machine-wide before per-user, in each browser's order. Windows reads the registry and Linux the
-/// managed JSON policy files; macOS managed preferences are not read. Empty when none is set.
+/// managed JSON policy files; macOS reads the managed preferences. Without the `system` feature
+/// only Linux reads anything. Empty when none is set.
 pub fn browser_policies() -> Vec<AutoSelectRule> {
-    #[cfg(windows)]
-    let entries = registry_entries();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let entries = json_entries();
-    #[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
-    let entries: Vec<String> = Vec::new();
-    rules_from_policy(entries.iter().map(String::as_str))
+    platform_rules()
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "system"))]
+fn platform_rules() -> Vec<AutoSelectRule> {
+    rules_from_policy(registry_entries().iter().map(String::as_str))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_rules() -> Vec<AutoSelectRule> {
+    rules_from_policy(json_entries().iter().map(String::as_str))
+}
+
+#[cfg(all(target_os = "macos", feature = "system"))]
+fn platform_rules() -> Vec<AutoSelectRule> {
+    macos_rules()
+}
+
+#[cfg(not(any(
+    all(windows, feature = "system"),
+    all(unix, not(target_os = "macos")),
+    all(target_os = "macos", feature = "system")
+)))]
+fn platform_rules() -> Vec<AutoSelectRule> {
+    Vec::new()
+}
+
+/// The managed preferences of Edge, Chrome and Chromium: machine-wide, then this user's.
+#[cfg(all(target_os = "macos", feature = "system"))]
+fn macos_rules() -> Vec<AutoSelectRule> {
+    let base = std::path::Path::new("/Library/Managed Preferences");
+    let user = std::env::home_dir()
+        .and_then(|home| home.file_name().map(std::ffi::OsStr::to_owned))
+        .unwrap_or_default();
+    let mut rules = Vec::new();
+    for directory in [base.to_path_buf(), base.join(user)] {
+        for domain in [
+            "com.microsoft.Edge",
+            "com.google.Chrome",
+            "org.chromium.Chromium",
+        ] {
+            if let Ok(bytes) = std::fs::read(directory.join(alloc::format!("{domain}.plist")))
+                && let Ok(found) = rules_from_plist(&bytes)
+            {
+                rules.extend(found);
+            }
+        }
+    }
+    rules
+}
+
+#[cfg(all(windows, feature = "system"))]
 fn registry_entries() -> Vec<String> {
     let mut entries = Vec::new();
     for hive in [

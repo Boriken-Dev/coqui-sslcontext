@@ -45,8 +45,11 @@ pub use keystore::{Pkcs11Source, Pkcs11SourceBuilder};
 pub use password::KeyPassword;
 pub use pin::{KeystoreKind, Pin, PinAnswer, PinCallback, PinPurpose, PinRequest};
 pub use pins::Pins;
+#[cfg(feature = "system")]
+pub use policy::rules_from_plist;
 pub use policy::{
     AutoSelectRule, AutoSelectRuleBuilder, NameFilter, browser_policies, rules_from_policy,
+    rules_from_policy_values,
 };
 pub use secret::Secret;
 pub use select::{
