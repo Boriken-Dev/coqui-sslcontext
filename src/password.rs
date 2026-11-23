@@ -1,10 +1,12 @@
 //! Where the password of an encrypted key or a PKCS#12 file comes from.
 
 use alloc::sync::Arc;
+#[cfg(feature = "encrypted-keys")]
 use alloc::vec::Vec;
 use core::fmt;
 use std::path::PathBuf;
 
+#[cfg(feature = "encrypted-keys")]
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Reason};
