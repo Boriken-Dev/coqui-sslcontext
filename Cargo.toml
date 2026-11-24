@@ -12,7 +12,7 @@ keywords = ["tls", "rustls", "client-certificate", "pkcs11", "system"]
 categories = ["network-programming", "cryptography"]
 # Git dependencies cannot be published to crates.io.
 publish = false
-exclude = [".*", "*.local.*", "/tools/"]
+exclude = [".*", "*.local.*", "/tools/", "/packaging/"]
 
 [package.metadata.docs.rs]
 all-features = true
