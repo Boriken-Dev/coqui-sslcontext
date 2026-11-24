@@ -141,7 +141,7 @@ so a retry cannot lock a card; make a new source to try another PIN.
 `CngSource::{current_user(&str), local_machine(&str), from_store(Arc<CertStore>, label), pin(impl Into<Pin>)}`
 (Windows, `system`): a key is opened silently first; when it needs a PIN the source's `Pin` decides
 (default `Pin::Keystore`: Windows shows its dialog).
-`KeychainSource::{new(), keychain(path), pin(impl Into<Pin>)}` (macOS, `system`): the PIN is the keychain
+`KeychainSource::{new(), keychain(path), pin(impl Into<Pin>), identities()}` (macOS, `system`; `identities` is its `IdentitySource` method): the PIN is the keychain
 file's password; the system prompts for key use on its own.
 `Pkcs11Source::{builder(module), discover(&Pkcs11Settings), system_default(), tokens() -> Result<Vec<String>, Error>}`
 and `Pkcs11SourceBuilder::{pin, token_label, token_serial, token (label or serial), slot, build}`
