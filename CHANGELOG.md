@@ -28,3 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Server configurations with optional or required client certificates (`ServerTls`).
 - A test certificate authority with name constraints (feature `issue`) and software identities
   that count signatures (feature `testing`).
+- `tools/sdk.lock` and the `deps` branch's pin in it; `packaging/container/Containerfile` builds the library and runs its tests
+  from the `deps` branch with no network, through `python3 tools/build.py container build|test`; `.env.example` lists the
+  overrides.
