@@ -159,7 +159,10 @@ fn a_fallback_identity_is_sent_only_when_the_keystores_have_nothing() {
     let tls = Tls::builder()
         .trust(Trust::Roots(vec![server_ca.der()]))
         .client_certificates(ClientCertificates::Selector(Arc::new(
-            Selector::builder().source(own.clone()).build(),
+            Selector::builder()
+                .source(own.clone())
+                .send_sole_candidate(true)
+                .build(),
         )))
         .fallback_identity(fallback)
         .build()

@@ -59,8 +59,8 @@ pub use policy::{
 };
 pub use secret::Secret;
 pub use select::{
-    CertificateRequest, Chooser, IdentityQuery, IdentityQueryBuilder, IdentitySource, Selector,
-    SelectorBuilder,
+    CertificateChoice, CertificatePolicy, CertificateRequest, Chooser, IdentityQuery,
+    IdentityQueryBuilder, IdentitySource, Selector, SelectorBuilder,
 };
 pub use server::{ClientAuth, ServerTls, ServerTlsBuilder};
 #[cfg(feature = "issue")]

@@ -57,7 +57,8 @@ verifies.
 chain member) whose public key is pinned. An empty `Pins` is an error at `build()`.
 `pin(..)` gives the system keystores' PIN source (default `Pin::Keystore`, as a browser).
 
-`NonDefault { setting, value, default }`: `non_defaults()` lists `trust = disabled` and a key log; a
+`NonDefault { setting, value, default }`: `non_defaults()` lists `trust = disabled`, a key log and
+`client_certificates = sole candidate sent unasked`; a
 stricter choice (TLS 1.3 only, pins, `remember(false)`) is not listed.
 
 ## Settings
@@ -86,10 +87,22 @@ find(&IdentityQuery) -> Vec<Identity>, candidates(&CertificateRequest), select(&
 policies() -> Vec<AutoSelectRule>, refresh(), forget(Option<&str>), resolver(Arc<Self>, Option<String>),
 resolver_for(Arc<Self>, Option<String>, Option<TlsVersion>)}`. Candidates are valid now, usable for
 client authentication, of a key type the server's schemes allow and issued under a CA the server
-names; the choice order is: the identity remembered for the host, the first rule, the browser
-policies, the `Chooser`, the only candidate. Otherwise none is sent. `Selector::system()` asks the
+names; the choice order is: the `CertificatePolicy` (below), the identity remembered for the host, the
+first rule, the browser policies, the `Chooser`. Otherwise **none is sent**: the only fitting candidate
+is sent unasked only with `SelectorSettings::send_sole_candidate` (default false; listed by
+`non_defaults()` as `client_certificates = sole candidate sent unasked`). `Selector::system()` asks the
 keystore for PINs (`Pin::Keystore`); `system_builder(Pin::None)` never waits on a person.
-`SelectorBuilder::{source, rules, browser_policy, chooser, remember, cache_ttl, remembered_capacity, settings, build}`.
+`SelectorBuilder::{source, rules, browser_policy, chooser, policy(CertificatePolicy), send_sole_candidate(bool),
+remember, cache_ttl, remembered_capacity, settings, build}`; `Selector::non_defaults() -> Vec<NonDefault>`.
+
+`CertificatePolicy = Arc<dyn Fn(&str) -> CertificateChoice + Send + Sync>` is the caller's rule per server
+host (the SNI name; `""` for a host-blind configuration), so a host matcher the caller already has decides.
+`CertificateChoice` (non_exhaustive): `None` sends nothing, whatever rules, browser policies or the chooser
+would pick; `Default` is the selector's own order above (remembered, rules, browser policies, chooser; nothing
+when none picks); `First` is the first candidate (the one expiring last); `Pin(IdentityQuery)` is the first
+candidate that matches the query (none if none does). `First` and `Pin` skip the remembered choice and the
+rules. `TlsBuilder::{certificate_policy(CertificatePolicy), send_sole_candidate(bool)}` configure the selector
+that `ClientCertificates::System` and `Query` build; a `Selector` given outright carries its own.
 
 `IdentitySource` (trait; `Send + Sync + Debug`): `identities() -> Result<Vec<Identity>, Error>`
 (required); provided `find(&IdentityQuery)`, `find_one(&IdentityQuery) -> Result<Identity, Error>`

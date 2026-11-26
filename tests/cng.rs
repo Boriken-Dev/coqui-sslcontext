@@ -35,7 +35,10 @@ fn a_certificate_and_key_held_by_a_windows_store_answer_a_servers_certificate_re
     let tls = Tls::builder()
         .trust(Trust::Roots(vec![server_ca.der()]))
         .client_certificates(ClientCertificates::Selector(Arc::new(
-            Selector::builder().source(source).build(),
+            Selector::builder()
+                .source(source)
+                .send_sole_candidate(true)
+                .build(),
         )))
         .build()
         .unwrap();

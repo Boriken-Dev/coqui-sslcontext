@@ -89,6 +89,9 @@ pub struct SelectorSettings {
     /// How many hosts' choices are remembered (default
     /// [`SelectorSettings::DEFAULT_REMEMBERED`]).
     pub remembered_capacity: usize,
+    /// Whether the only fitting candidate is sent although no rule, policy or chooser picked it
+    /// (default `false`). On is listed by `non_defaults()`: any server that asks learns the certificate.
+    pub send_sole_candidate: bool,
 }
 
 impl SelectorSettings {
@@ -103,6 +106,7 @@ impl Default for SelectorSettings {
             remember: true,
             browser_policy: false,
             remembered_capacity: Self::DEFAULT_REMEMBERED,
+            send_sole_candidate: false,
         }
     }
 }

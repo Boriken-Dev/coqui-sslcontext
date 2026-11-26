@@ -43,7 +43,7 @@ cargo add --git https://github.com/Boriken-Dev/coqui-sslcontext coqui-sslcontext
 ## Quick start
 
 A client configuration that verifies as the system does and answers certificate requests as a
-browser would:
+browser would, except that it sends none unless a rule, browser policy, chooser or `CertificatePolicy` picks one:
 
 ```rust,no_run
 # fn main() -> Result<(), coqui_sslcontext::Error> {

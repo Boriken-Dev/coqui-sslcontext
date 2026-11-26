@@ -3,7 +3,8 @@ mod support;
 use std::sync::Arc;
 
 use coqui_sslcontext::{
-    AutoSelectRule, ClientCertificates, Identity, NameFilter, Selector, Tls, Trust,
+    AutoSelectRule, CertificateChoice, ClientCertificates, Identity, IdentityQuery, NameFilter,
+    Selector, Tls, Trust,
 };
 use support::pki::{Ca, Leaf};
 use support::tls_server::{ClientAuth, TlsServer, https_get};
@@ -43,6 +44,7 @@ fn the_certificate_issued_under_a_ca_the_server_names_is_presented() {
     let selector = Selector::builder()
         .source(identity(&unwanted, "other"))
         .source(identity(&wanted, "corp"))
+        .policy(Arc::new(|_| CertificateChoice::First))
         .build();
     let tls = tls_with(&w, selector);
     let reply = https_get(
@@ -281,4 +283,123 @@ fn disabling_trust_is_reported_as_a_non_default_setting() {
     )
     .unwrap();
     assert!(reply.ends_with("no client certificate"));
+}
+
+#[test]
+fn a_sole_fitting_certificate_is_not_sent_unasked() {
+    let w = world();
+    let corp = Ca::new("Corp Client CA");
+    let alice = corp.issue_client("alice");
+    let server = TlsServer::start(&w.server, &[corp.der()], ClientAuth::Optional);
+    let selector = Selector::builder()
+        .source(identity(&alice, "alice"))
+        .build();
+    let tls = tls_with(&w, selector);
+    let reply = https_get(
+        tls.client_config("localhost").unwrap(),
+        server.addr,
+        "localhost",
+    )
+    .unwrap();
+    assert!(reply.ends_with("no client certificate"), "{reply}");
+    assert_eq!(server.presented(), [None]);
+}
+
+fn presented_by(w: &World, corp: &Ca, selector: Selector) -> Option<Vec<u8>> {
+    let server = TlsServer::start(&w.server, &[corp.der()], ClientAuth::Optional);
+    let tls = tls_with(w, selector);
+    https_get(
+        tls.client_config("localhost").unwrap(),
+        server.addr,
+        "localhost",
+    )
+    .unwrap();
+    server.presented().remove(0)
+}
+
+#[test]
+fn a_certificate_policy_decides_per_host_and_can_send_none_first_or_a_pinned_identity() {
+    let w = world();
+    let corp = Ca::new("Corp Client CA");
+    let alice = corp.issue_client("alice");
+    let bob = corp.issue_client("bob");
+    let with = |choice: CertificateChoice| {
+        Selector::builder()
+            .source(identity(&alice, "alice"))
+            .source(identity(&bob, "bob"))
+            .rules([AutoSelectRule::builder("localhost").build()])
+            .policy(Arc::new(move |_| choice.clone()))
+            .build()
+    };
+    // `None` beats a rule that matches the host.
+    assert_eq!(presented_by(&w, &corp, with(CertificateChoice::None)), None);
+    let first = presented_by(&w, &corp, with(CertificateChoice::First));
+    assert!(first == Some(alice.leaf_der().to_vec()) || first == Some(bob.leaf_der().to_vec()));
+    let pin = IdentityQuery::builder().label("bob").build();
+    assert_eq!(
+        presented_by(&w, &corp, with(CertificateChoice::Pin(pin))),
+        Some(bob.leaf_der().to_vec())
+    );
+    let nobody = IdentityQuery::builder().label("nobody").build();
+    assert_eq!(
+        presented_by(&w, &corp, with(CertificateChoice::Pin(nobody))),
+        None
+    );
+    // `Default` is the selector's own choice: here the rule matches the host.
+    assert!(presented_by(&w, &corp, with(CertificateChoice::Default)).is_some());
+}
+
+#[test]
+fn a_certificate_policy_is_given_the_server_host() {
+    let w = world();
+    let corp = Ca::new("Corp Client CA");
+    let alice = corp.issue_client("alice");
+    let selector = Selector::builder()
+        .source(identity(&alice, "alice"))
+        .policy(Arc::new(|host| {
+            if host == "localhost" {
+                CertificateChoice::First
+            } else {
+                CertificateChoice::None
+            }
+        }))
+        .build();
+    assert_eq!(
+        presented_by(&w, &corp, selector),
+        Some(alice.leaf_der().to_vec())
+    );
+}
+
+#[test]
+fn sending_the_sole_candidate_is_a_listed_weakening() {
+    let w = world();
+    let corp = Ca::new("Corp Client CA");
+    let alice = corp.issue_client("alice");
+    let selector = Selector::builder()
+        .source(identity(&alice, "alice"))
+        .send_sole_candidate(true)
+        .build();
+    assert_eq!(selector.non_defaults().len(), 1);
+    let tls = tls_with(&w, selector);
+    let listed = tls.non_defaults();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].setting, "client_certificates");
+    assert_eq!(listed[0].value, "sole candidate sent unasked");
+    assert!(
+        Selector::builder().build().non_defaults().is_empty() && {
+            let tls = Tls::builder().build().unwrap();
+            tls.non_defaults().is_empty()
+        }
+    );
+    let builder = Tls::builder().send_sole_candidate(true);
+    assert_eq!(builder.non_defaults()[0].setting, "client_certificates");
+    let sent = presented_by(
+        &w,
+        &corp,
+        Selector::builder()
+            .source(identity(&alice, "alice"))
+            .send_sole_candidate(true)
+            .build(),
+    );
+    assert_eq!(sent, Some(alice.leaf_der().to_vec()));
 }

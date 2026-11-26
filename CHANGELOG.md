@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A client sends a certificate only when a rule, a browser policy, a chooser or the new
+  `CertificatePolicy` picks one: the only fitting candidate is no longer sent to whatever server asks.
+  `SelectorSettings::send_sole_candidate` (listed by `non_defaults()`) restores it.
 - A pin counts only a certificate the leaf chains to; pins with `Trust::Disabled` are refused.
 - A rejected PIN is recorded atomically, before the PIN callback is asked again; a failed
   signature drops its PKCS#11 session; PINs and key files are wiped from memory.
@@ -16,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `CertificatePolicy` and `CertificateChoice` (`None`, `Default`, `First`, `Pin`): the caller's rule per
+  server host, set with `SelectorBuilder::policy` or `TlsBuilder::certificate_policy`.
 - Client configurations that follow the system (`Tls`, `TlsBuilder`, `client_config`): OS trust,
   roots, PEM bundles, public key pins (`Pins`, `Trust::Pinned`), TLS version bounds, key logging.
 - Client certificates held in Windows CNG, the macOS Keychain and PKCS#11 tokens, chosen as a

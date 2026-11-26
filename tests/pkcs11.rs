@@ -214,7 +214,10 @@ fn child() {
     let tls = Tls::builder()
         .trust(Trust::Roots(vec![server_ca.der()]))
         .client_certificates(ClientCertificates::Selector(Arc::new(
-            Selector::builder().source(source).build(),
+            Selector::builder()
+                .source(source)
+                .send_sole_candidate(true)
+                .build(),
         )))
         .build()
         .unwrap();
