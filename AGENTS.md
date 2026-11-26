@@ -174,7 +174,10 @@ ServerTls::{server_config() -> Arc<rustls::ServerConfig>, settings(), non_defaul
 
 `ClientAuth::{None (default), Optional(Trust), Required(Trust)}`: client certificates are verified
 against the trust's roots (`System` loads the OS roots; `Disabled` and an empty trust are errors:
-ask for none instead). A keystore-held key works through `Identity`.
+ask for none instead). **System roots vouch for strangers**: any public CA issues client-auth
+certificates to anyone, so `Trust::System` authenticates nobody in particular; `non_defaults()` lists
+it as `client_auth = system roots`. Name your own CA's roots (`Trust::Roots`, `Trust::Bundle`). A
+keystore-held key works through `Identity`.
 
 ## Policy (`coqui_sslcontext::policy`, also at the root)
 

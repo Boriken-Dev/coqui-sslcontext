@@ -284,3 +284,28 @@ fn logging_session_secrets_is_reported_as_a_non_default() {
         .unwrap();
     assert_eq!(logging.non_defaults()[0].setting, "key_log");
 }
+
+#[test]
+fn client_auth_against_the_system_roots_is_a_listed_weakening() {
+    let ca = Ca::new("Listed CA");
+    let leaf = ca.issue_server("localhost");
+    let make = |auth: ClientAuth| ServerTls::builder(identity(&leaf)).client_auth(auth);
+
+    assert!(make(ClientAuth::None).non_defaults().is_empty());
+    assert!(
+        make(ClientAuth::Required(Trust::Roots(vec![ca.der()])))
+            .non_defaults()
+            .is_empty()
+    );
+    for auth in [
+        ClientAuth::Required(Trust::System),
+        ClientAuth::Optional(Trust::System),
+    ] {
+        let builder = make(auth);
+        let listed = builder.non_defaults();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].setting, "client_auth");
+        assert_eq!(listed[0].value, "system roots");
+        assert_eq!(builder.build().unwrap().non_defaults(), listed);
+    }
+}
