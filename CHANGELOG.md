@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- An encrypted PKCS#8 key asking for more key derivation work than `KeySettings` allows (10 000 000
+  PBKDF2 iterations, 1 GiB of scrypt memory) is refused before any is done, instead of stalling or
+  aborting the process; raising a bound is listed by `KeySettings::non_defaults()`.
 - `ServerTls::non_defaults()` lists client authentication against the system roots, which accept any
   publicly issued client certificate.
 - A key log file is created mode 0600 on Unix, and an existing one open to group or others is

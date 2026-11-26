@@ -65,4 +65,6 @@ pub use select::{
 pub use server::{ClientAuth, ServerTls, ServerTlsBuilder};
 #[cfg(feature = "issue")]
 pub use settings::IssueSettings;
-pub use settings::{KeyLogging, Pkcs11Settings, SelectorSettings, TlsSettings, TlsVersion};
+pub use settings::{
+    KeyLogging, KeySettings, Pkcs11Settings, SelectorSettings, TlsSettings, TlsVersion,
+};

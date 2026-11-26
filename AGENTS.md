@@ -68,6 +68,8 @@ config_cache_capacity: usize (256) }`; `KeyLogging::{Off, Environment, File(Path
 log format; `File` appends, is created mode 0600 on Unix and logs a warning when an existing file is
 readable by group or others; on Windows no owner-only ACL is set, so keep it in a private directory); `TlsVersion::{Tls12, Tls13}`.
 `SelectorSettings { cache_ttl (60 s), remember (true), browser_policy (false), remembered_capacity (256) }`.
+`KeySettings { max_pbkdf2_iterations: u32 (10_000_000), max_scrypt_memory: u64 (1 GiB, 128 * r * (N + p)) }`
+(`KeySettings::non_defaults()` lists a bound raised above its default; see Identities).
 `Pkcs11Settings { module_candidates: Vec<PathBuf> }` (default: p11-kit's proxy then OpenSC's module
 by platform; `Pkcs11Settings::default_candidates()`). `IssueSettings` (feature `issue`):
 `ca_validity` 3650 d, `leaf_validity` 30 d, `backdate` 1 h, `key_type` EC P-256, `rsa_bits` 2048,
@@ -123,9 +125,13 @@ tell a resolver the negotiated version), otherwise `None`.
 
 `Identity::{new(chain, Arc<dyn SigningKey>, label), from_pem(certs, key), from_pem_with(certs, key, &KeyPassword),
 from_der(chain, key_der), load(cert_path, key_path, KeyPassword), load_combined(path, KeyPassword),
-from_pkcs12(&[u8], &KeyPassword) (feature pkcs12), info() -> &CertificateInfo, label(), chain()}`. Keys may
+from_pkcs12(&[u8], &KeyPassword) (feature pkcs12), from_pem_with_settings(certs, key, &KeyPassword, &KeySettings),
+load_with_settings(cert_path, key_path, KeyPassword, &KeySettings), load_combined_with_settings(path, KeyPassword, &KeySettings), info() -> &CertificateInfo, label(), chain()}`. Keys may
 be PKCS#8, PKCS#1 or SEC1; encrypted PKCS#8 needs `encrypted-keys` (else `Error::Unsupported`).
-`load` takes PEM or DER for each file; `load_combined` takes combined PEM, or PKCS#12 (found by its
+An encrypted PKCS#8 key names its own PBKDF2 iteration count or scrypt cost; a document asking for more than
+`KeySettings` allows is `Error::Credential`, refused before any work (the plain methods use the defaults;
+`CertificateAuthority::from_pem_with_settings` too). PKCS#12 is not covered: `p12-keystore` refuses more than
+1 000 000 PBKDF2 iterations and 1 GiB of scrypt memory as fixed limits. `load` takes PEM or DER for each file; `load_combined` takes combined PEM, or PKCS#12 (found by its
 shape). `KeyPassword::{None, Secret(Secret), File(PathBuf), Callback(Arc<dyn Fn() -> Option<Secret>>)}`
 is consulted only when the key turns out encrypted; `File` is its first line.
 `CertificateInfo::{subject, issuer, serial() (bytes), not_before, not_after, sha1, sha256, fingerprint

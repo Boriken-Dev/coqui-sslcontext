@@ -97,7 +97,7 @@ let config = server.server_config(); // Arc<rustls::ServerConfig>
 | `policy` | browser auto-select rules |
 | `ServerTls`, `ClientAuth` | server configurations |
 | `CertificateAuthority`, `IssuedCertificate`, `LeafBuilder` | the test CA (feature `issue`) |
-| `TlsSettings`, `SelectorSettings`, `Pkcs11Settings`, `IssueSettings` | every bound and switch, as data |
+| `TlsSettings`, `SelectorSettings`, `KeySettings`, `Pkcs11Settings`, `IssueSettings` | every bound and switch, as data |
 | `testing` | counting software keys (feature `testing`) |
 
 ## Development

@@ -155,6 +155,7 @@ fn a_password_comes_from_a_value_a_file_or_a_callback_and_never_prints() {
 #[cfg(feature = "encrypted-keys")]
 mod encrypted {
     use super::*;
+    use coqui_sslcontext::KeySettings;
 
     fn encrypted_pem(leaf: &Leaf, password: &str) -> String {
         use pkcs8::der::Decode;
@@ -190,6 +191,107 @@ mod encrypted {
         )
         .unwrap();
         assert_eq!(identity.chain().len(), leaf.chain.len());
+    }
+
+    /// An encrypted key document whose KDF asks for `kdf`, around bytes that are not a key.
+    fn hostile_pem(kdf: pkcs8::pkcs5::pbes2::Kdf) -> String {
+        use pkcs8::der::Encode;
+        use pkcs8::pkcs5::pbes2::{EncryptionScheme, Parameters};
+        let params = Parameters {
+            kdf,
+            encryption: EncryptionScheme::Aes256Cbc { iv: [7; 16] },
+        };
+        let info = pkcs8::EncryptedPrivateKeyInfoOwned {
+            encryption_algorithm: params.into(),
+            encrypted_data: pkcs8::der::asn1::OctetString::new(vec![0u8; 32]).unwrap(),
+        };
+        pem("ENCRYPTED PRIVATE KEY", &info.to_der().unwrap())
+    }
+
+    fn pbkdf2(iteration_count: u32) -> pkcs8::pkcs5::pbes2::Kdf {
+        use pkcs8::pkcs5::pbes2::{Kdf, Pbkdf2Params, Pbkdf2Prf};
+        Kdf::Pbkdf2(Pbkdf2Params {
+            salt: [1u8; 16].as_slice().try_into().unwrap(),
+            iteration_count,
+            key_length: None,
+            prf: Pbkdf2Prf::HmacWithSha256,
+        })
+    }
+
+    fn scrypt(log_n: u32) -> pkcs8::pkcs5::pbes2::Kdf {
+        use pkcs8::pkcs5::pbes2::{Kdf, ScryptParams};
+        Kdf::Scrypt(ScryptParams {
+            salt: [1u8; 16].as_slice().try_into().unwrap(),
+            cost_parameter: 1u64 << log_n,
+            block_size: 8,
+            parallelization: 1,
+            key_length: None,
+        })
+    }
+
+    #[test]
+    fn a_key_asking_for_more_kdf_work_than_the_bounds_allow_is_refused_before_it_is_tried() {
+        let leaf = client();
+        let certificates = chain_pem(&leaf);
+        let started = std::time::Instant::now();
+        for key in [hostile_pem(pbkdf2(1 << 31)), hostile_pem(scrypt(40))] {
+            let error = Identity::from_pem_with(
+                certificates.as_bytes(),
+                key.as_bytes(),
+                &KeyPassword::from("any"),
+            )
+            .unwrap_err();
+            assert!(matches!(error, Error::Credential(_)), "{error}");
+            assert!(error.to_string().contains("settings allow"), "{error}");
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn the_kdf_bounds_are_settings_and_raising_them_is_listed() {
+        let leaf = client();
+        let certificates = chain_pem(&leaf);
+        let mut settings = KeySettings::default();
+        assert_eq!(settings.max_pbkdf2_iterations, 10_000_000);
+        assert_eq!(settings.max_scrypt_memory, 1 << 30);
+        assert!(settings.non_defaults().is_empty());
+
+        // Stricter bounds are not listed, and apply: 2000 iterations and 2^14 * 8 * 128 bytes.
+        settings.max_pbkdf2_iterations = 1000;
+        settings.max_scrypt_memory = 1 << 20;
+        assert!(settings.non_defaults().is_empty());
+        for key in [hostile_pem(pbkdf2(2000)), hostile_pem(scrypt(14))] {
+            let error = Identity::from_pem_with_settings(
+                certificates.as_bytes(),
+                key.as_bytes(),
+                &KeyPassword::from("any"),
+                &settings,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("settings allow"), "{error}");
+        }
+
+        // The same documents pass the bound, and fail later, on the wrong key bytes.
+        settings.max_pbkdf2_iterations = 2000;
+        settings.max_scrypt_memory = 1 << 24;
+        let key = hostile_pem(pbkdf2(2000));
+        let error = Identity::from_pem_with_settings(
+            certificates.as_bytes(),
+            key.as_bytes(),
+            &KeyPassword::from("any"),
+            &settings,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not decrypt"), "{error}");
+
+        settings.max_pbkdf2_iterations = 20_000_000;
+        settings.max_scrypt_memory = 2 << 30;
+        let listed: Vec<_> = settings
+            .non_defaults()
+            .into_iter()
+            .map(|n| n.setting)
+            .collect();
+        assert_eq!(listed, ["max_pbkdf2_iterations", "max_scrypt_memory"]);
     }
 
     #[test]
