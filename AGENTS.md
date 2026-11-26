@@ -65,7 +65,8 @@ stricter choice (TLS 1.3 only, pins, `remember(false)`) is not listed.
 
 `TlsSettings { minimum_version: TlsVersion (Tls12), maximum_version (Tls13), key_log: KeyLogging (Off),
 config_cache_capacity: usize (256) }`; `KeyLogging::{Off, Environment, File(PathBuf)}` (the NSS key
-log format; `File` appends, so protect it); `TlsVersion::{Tls12, Tls13}`.
+log format; `File` appends, is created mode 0600 on Unix and logs a warning when an existing file is
+readable by group or others; on Windows no owner-only ACL is set, so keep it in a private directory); `TlsVersion::{Tls12, Tls13}`.
 `SelectorSettings { cache_ttl (60 s), remember (true), browser_policy (false), remembered_capacity (256) }`.
 `Pkcs11Settings { module_candidates: Vec<PathBuf> }` (default: p11-kit's proxy then OpenSC's module
 by platform; `Pkcs11Settings::default_candidates()`). `IssueSettings` (feature `issue`):

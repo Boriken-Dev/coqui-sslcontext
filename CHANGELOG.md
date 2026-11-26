@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A key log file is created mode 0600 on Unix, and an existing one open to group or others is
+  warned about (no owner-only ACL on Windows).
 - A client sends a certificate only when a rule, a browser policy, a chooser or the new
   `CertificatePolicy` picks one: the only fitting candidate is no longer sent to whatever server asks.
   `SelectorSettings::send_sole_candidate` (listed by `non_defaults()`) restores it.

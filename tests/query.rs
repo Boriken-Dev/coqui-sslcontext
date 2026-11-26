@@ -433,3 +433,27 @@ fn the_per_host_configurations_are_bounded() {
         &tls.client_config("a.example").unwrap()
     ));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_new_key_log_is_private_to_its_owner_and_an_existing_wider_one_is_left_as_it_is() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let fresh = dir.path().join("fresh.log");
+    let _tls = Tls::builder()
+        .key_log(KeyLogging::File(fresh.clone()))
+        .build()
+        .unwrap();
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&fresh), 0o600);
+
+    let wide = dir.path().join("wide.log");
+    std::fs::write(&wide, "").unwrap();
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let _tls = Tls::builder()
+        .key_log(KeyLogging::File(wide.clone()))
+        .build()
+        .unwrap();
+    assert_eq!(mode(&wide), 0o644);
+}
